@@ -56,9 +56,13 @@ def build_floor_mapping_df(floor_mapping, is_llm=False, llm_detail=None):
     return pd.DataFrame(rows)
 
 
-def compute_all_space_matches(data_a, data_b, floor_mapping, spaces_dict_a, spaces_dict_b, area_thresh=2.0, centroid_thresh=1.0, status_cb=None):
+def compute_all_space_matches(data_a, data_b, floor_mapping, area_thresh=2.0, centroid_thresh=1.0,
+                               status_cb=None):
     """floor_mapping에 포함된 모든 층 쌍에 대해 공간 매칭을 일괄 계산.
-    캐시된 spaces_dict를 활용하여 중복 파싱을 방지합니다.
+    반환: (matched_pairs, unmatched_a, unmatched_b, df_space_matching)
+      - matched_pairs: [{'A_층','A_공간','A_면적(㎡)','B_층','B_공간','B_면적(㎡)',
+                          '면적차(㎡)','centroid거리(m)','A_entity','B_entity'}, ...]
+      - unmatched_a/b: [(층이름, space_entry), ...] (space_entry는 _floor_space_polygons 형식)
     """
     matched_pairs, unmatched_a, unmatched_b = [], [], []
     storeys_b_by_name = {s['Name']: s for s in data_b['storeys']}
@@ -68,9 +72,7 @@ def compute_all_space_matches(data_a, data_b, floor_mapping, spaces_dict_a, spac
         b_name = floor_mapping.get(a_name)
         if status_cb:
             status_cb(f'공간 매칭 계산 중: {a_name} ...')
-        
-        # 딕셔너리에서 가져오거나 빈 리스트 반환
-        spaces_a = spaces_dict_a.get(a_name, [])
+        spaces_a = _floor_space_polygons(a_storey)
 
         if not b_name or b_name not in storeys_b_by_name:
             for sp in spaces_a:
@@ -78,10 +80,7 @@ def compute_all_space_matches(data_a, data_b, floor_mapping, spaces_dict_a, spac
             continue
 
         b_storey = storeys_b_by_name[b_name]
-        
-        # 딕셔너리에서 가져오거나 빈 리스트 반환
-        spaces_b = spaces_dict_b.get(b_name, [])
-        
+        spaces_b = _floor_space_polygons(b_storey)
         a_to_b, b_to_a, offset, match_info = fc.match_spaces(
             spaces_a, spaces_b, area_thresh=area_thresh, centroid_thresh=centroid_thresh)
 
@@ -145,7 +144,7 @@ def build_unmatched_object_summary_df(ifc_a, unmatched_a, ifc_b, unmatched_b):
     return pd.DataFrame(rows)
 
 
-def build_comparison_workbook(data_a, data_b, floor_mapping, spaces_dict_a, spaces_dict_b, is_llm_floor_mapping=False,
+def build_comparison_workbook(data_a, data_b, floor_mapping, is_llm_floor_mapping=False,
                                llm_floor_detail=None, area_thresh=2.0, centroid_thresh=1.0,
                                status_cb=None):
     """네 시트(층 매칭 / 공간 매칭 / 매칭공간 객체비교 / 미매칭공간 객체요약)로 구성된
@@ -161,7 +160,7 @@ def build_comparison_workbook(data_a, data_b, floor_mapping, spaces_dict_a, spac
     ite._write_df(ws, df_floor)
 
     matched_pairs, unmatched_a, unmatched_b, df_space = compute_all_space_matches(
-        data_a, data_b, floor_mapping, spaces_dict_a, spaces_dict_b, area_thresh=area_thresh, centroid_thresh=centroid_thresh,
+        data_a, data_b, floor_mapping, area_thresh=area_thresh, centroid_thresh=centroid_thresh,
         status_cb=status_cb,
     )
     ws = wb.create_sheet(ite._unique_sheet_name(wb, '02_공간_매칭', used_names))

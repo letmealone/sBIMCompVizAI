@@ -582,29 +582,6 @@ if file_a and file_b:
             export_status.caption(f'⏳ {msg}')
 
         try:
-            # ---- [수정] UI 세션에 캐싱된 공간 지오메트리 추출 ----
-            export_status.caption('⏳ 렌더링된 공간 지오메트리 캐시 확인 및 추출 중...')
-            
-            spaces_dict_a = {}
-            for s in data_a['storeys']:
-                name = s['Name']
-                cache_key = f"{_SESSION_CACHE_PREFIX}plan_left_{file_hash_a}_{name}"
-                if cache_key in st.session_state:
-                    spaces_dict_a[name] = st.session_state[cache_key]['spaces']
-                else:
-                    # 화면에서 한 번도 클릭하지 않아 캐시가 없는 층만 새로 계산 (구조요소 생략)
-                    spaces_dict_a[name] = cmpexp._floor_space_polygons(s)
-
-            spaces_dict_b = {}
-            for s in data_b['storeys']:
-                name = s['Name']
-                cache_key = f"{_SESSION_CACHE_PREFIX}plan_right_{file_hash_b}_{name}"
-                if cache_key in st.session_state:
-                    spaces_dict_b[name] = st.session_state[cache_key]['spaces']
-                else:
-                    spaces_dict_b[name] = cmpexp._floor_space_polygons(s)
-            # -------------------------------------------------------------
-
             with st.spinner('전문가(A) IFC 전체 부재 엑셀 생성 중...'):
                 _tmp_a_path = tempfile.NamedTemporaryFile(suffix='.ifc', delete=False).name
                 with open(_tmp_a_path, 'wb') as fpa:
@@ -621,7 +598,6 @@ if file_a and file_b:
 
             wb_compare = cmpexp.build_comparison_workbook(
                 data_a, data_b, _badge_source,
-                spaces_dict_a=spaces_dict_a, spaces_dict_b=spaces_dict_b,  # [수정] 딕셔너리 파라미터 주입
                 is_llm_floor_mapping=(llm_floor_mapping is not None), llm_floor_detail=llm_floor_detail,
                 area_thresh=export_area_thresh, centroid_thresh=export_centroid_thresh,
                 status_cb=_export_status_cb,
