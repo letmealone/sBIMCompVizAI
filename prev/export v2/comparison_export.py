@@ -16,13 +16,9 @@ from collections import Counter
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill
 
 import floorplan_core as fc
 import ifc_to_excel as ite
-
-# 차이가 나는 셀에 적용할 배경색 (연한 붉은색)
-DIFF_FILL = PatternFill(start_color="FFE6E6", end_color="FFE6E6", fill_type="solid")
 
 
 def _floor_space_polygons(storey_entity, tol=0.05):
@@ -114,76 +110,21 @@ def compute_all_space_matches(data_a, data_b, floor_mapping, spaces_dict_a, spac
 
 def build_matched_object_comparison_df(ifc_a, ifc_b, matched_pairs):
     """03_매칭공간_객체비교 시트용 DataFrame: 매칭된 공간 쌍마다 접한 부재를
-    IFC 클래스별 개수로 비교합니다. ('차이' 컬럼은 제거되고 시트 스타일링으로 대체)"""
+    IFC 클래스별 개수로 비교(A개수/B개수/차이)."""
     rows = []
     for m in matched_pairs:
         cnt_a = _element_class_counts(ifc_a, m['A_entity'])
         cnt_b = _element_class_counts(ifc_b, m['B_entity'])
         row = {
             'A_층': m['A_층'], 'A_공간': m['A_공간'], 'B_층': m['B_층'], 'B_공간': m['B_공간'],
-            'A_면적(㎡)': m['A_면적(㎡)'], 'B_면적(㎡)': m['B_면적(㎡)'], 
-            # '면적차(㎡)': m['면적차(㎡)'], # 제거됨 (색상 강조로 대체)
+            'A_면적(㎡)': m['A_면적(㎡)'], 'B_면적(㎡)': m['B_면적(㎡)'], '면적차(㎡)': m['면적차(㎡)'],
         }
         for c in sorted(set(cnt_a) | set(cnt_b)):
             a_n, b_n = cnt_a.get(c, 0), cnt_b.get(c, 0)
             row[f'{c}_A개수'] = a_n
             row[f'{c}_B개수'] = b_n
-            # row[f'{c}_차이(A-B)'] = a_n - b_n # 제거됨 (색상 강조로 대체)
+            row[f'{c}_차이(A-B)'] = a_n - b_n
         rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def build_matched_space_detail_df(data_a, data_b, matched_pairs):
-    """03b_매칭공간_상세비교 시트용 DataFrame: 매칭된 공간 쌍마다 앱(Streamlit)에서 
-    보여주는 상세 정보(벽 내외부 구분/면적, 기타부재 면적, 설비 개수)를 추출합니다."""
-    rows = []
-    for m in matched_pairs:
-        detail_a = fc.build_space_detail(data_a['ifc_file'], data_a['wall_classification'], m['A_entity'])
-        detail_b = fc.build_space_detail(data_b['ifc_file'], data_b['wall_classification'], m['B_entity'])
-        
-        base_info = {
-            'A_층': m['A_층'], 'A_공간': m['A_공간'],
-            'B_층': m['B_층'], 'B_공간': m['B_공간']
-        }
-        
-        # 1. 벽 내부/외부 구분 (개수)
-        keys_wall_cnt = set(detail_a['wall_simple_counts']) | set(detail_b['wall_simple_counts'])
-        for k in sorted(keys_wall_cnt):
-            r = dict(base_info)
-            r.update({'대분류': '벽 내/외부 구분(개수)', '상세구분': k, 
-                      '전문가(A)_수치': detail_a['wall_simple_counts'].get(k, 0),
-                      'AI(B)_수치': detail_b['wall_simple_counts'].get(k, 0), '단위': '개'})
-            rows.append(r)
-            
-        # 2. 벽 내부/외부 구분 (면적)
-        keys_wall_area = set(detail_a['wall_simple_area']) | set(detail_b['wall_simple_area'])
-        for k in sorted(keys_wall_area):
-            r = dict(base_info)
-            r.update({'대분류': '벽 내/외부 구분(면적)', '상세구분': k, 
-                      '전문가(A)_수치': detail_a['wall_simple_area'].get(k, 0.0),
-                      'AI(B)_수치': detail_b['wall_simple_area'].get(k, 0.0), '단위': '㎡'})
-            rows.append(r)
-            
-        # 3. 벽 이외 부재 유형별 합산 면적
-        keys_area = set(detail_a['area_by_class']) | set(detail_b['area_by_class'])
-        for k in sorted(keys_area):
-            val_a = detail_a['area_by_class'].get(k, {}).get('면적합계(㎡)')
-            val_b = detail_b['area_by_class'].get(k, {}).get('면적합계(㎡)')
-            r = dict(base_info)
-            r.update({'대분류': '벽 이외 부재 합산 면적', '상세구분': k, 
-                      '전문가(A)_수치': val_a if val_a is not None else 0.0,
-                      'AI(B)_수치': val_b if val_b is not None else 0.0, '단위': '㎡'})
-            rows.append(r)
-            
-        # 4. 설비 개수
-        keys_eq = set(detail_a['equipment_counts']) | set(detail_b['equipment_counts'])
-        for k in sorted(keys_eq):
-            r = dict(base_info)
-            r.update({'대분류': '설비 개수', '상세구분': k, 
-                      '전문가(A)_수치': detail_a['equipment_counts'].get(k, 0),
-                      'AI(B)_수치': detail_b['equipment_counts'].get(k, 0), '단위': '개'})
-            rows.append(r)
-            
     return pd.DataFrame(rows)
 
 
@@ -204,57 +145,11 @@ def build_unmatched_object_summary_df(ifc_a, unmatched_a, ifc_b, unmatched_b):
     return pd.DataFrame(rows)
 
 
-def _apply_diff_formatting(ws, df, sheet_type):
-    """데이터프레임에 작성된 엑셀 시트를 순회하며, A와 B의 수치가 다를 경우 배경색을 칠합니다."""
-    if df.empty:
-        return
-
-    headers = list(df.columns)
-    
-    def _to_float(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-
-    if sheet_type == '03_객체비교':
-        pairs = []
-        # 공간 자체의 면적 비교
-        if 'A_면적(㎡)' in headers and 'B_면적(㎡)' in headers:
-            pairs.append((headers.index('A_면적(㎡)') + 1, headers.index('B_면적(㎡)') + 1))
-        
-        # 각 부재별 개수 비교
-        classes = set([c.replace('_A개수', '') for c in headers if c.endswith('_A개수')])
-        for c in classes:
-            if f'{c}_A개수' in headers and f'{c}_B개수' in headers:
-                pairs.append((headers.index(f'{c}_A개수') + 1, headers.index(f'{c}_B개수') + 1))
-                
-        for row_idx in range(2, ws.max_row + 1):
-            for col_a, col_b in pairs:
-                val_a = ws.cell(row=row_idx, column=col_a).value
-                val_b = ws.cell(row=row_idx, column=col_b).value
-                
-                if abs(_to_float(val_a) - _to_float(val_b)) > 1e-4:
-                    ws.cell(row=row_idx, column=col_a).fill = DIFF_FILL
-                    ws.cell(row=row_idx, column=col_b).fill = DIFF_FILL
-
-    elif sheet_type == '03b_상세비교':
-        if '전문가(A)_수치' in headers and 'AI(B)_수치' in headers:
-            col_a = headers.index('전문가(A)_수치') + 1
-            col_b = headers.index('AI(B)_수치') + 1
-            for row_idx in range(2, ws.max_row + 1):
-                val_a = ws.cell(row=row_idx, column=col_a).value
-                val_b = ws.cell(row=row_idx, column=col_b).value
-                
-                if abs(_to_float(val_a) - _to_float(val_b)) > 1e-4:
-                    ws.cell(row=row_idx, column=col_a).fill = DIFF_FILL
-                    ws.cell(row=row_idx, column=col_b).fill = DIFF_FILL
-
-
 def build_comparison_workbook(data_a, data_b, floor_mapping, spaces_dict_a, spaces_dict_b, is_llm_floor_mapping=False,
                                llm_floor_detail=None, area_thresh=2.0, centroid_thresh=1.0,
                                status_cb=None):
-    """비교 결과 워크북을 생성해 반환한다(저장은 호출부에서)."""
+    """네 시트(층 매칭 / 공간 매칭 / 매칭공간 객체비교 / 미매칭공간 객체요약)로 구성된
+    비교 결과 워크북을 생성해 반환한다(저장은 호출부에서)."""
     wb = Workbook()
     wb.remove(wb.active)
     used_names = set()
@@ -275,16 +170,8 @@ def build_comparison_workbook(data_a, data_b, floor_mapping, spaces_dict_a, spac
     if status_cb:
         status_cb('매칭된 공간별 객체 비교 계산 중...')
     df_compare = build_matched_object_comparison_df(data_a['ifc_file'], data_b['ifc_file'], matched_pairs)
-    ws_compare = wb.create_sheet(ite._unique_sheet_name(wb, '03_매칭공간_객체비교', used_names))
-    ite._write_df(ws_compare, df_compare)
-    _apply_diff_formatting(ws_compare, df_compare, '03_객체비교')
-
-    if status_cb:
-        status_cb('매칭된 공간별 상세 비교(면적/설비 등) 계산 중...')
-    df_detail = build_matched_space_detail_df(data_a, data_b, matched_pairs)
-    ws_detail = wb.create_sheet(ite._unique_sheet_name(wb, '03b_매칭공간_상세비교', used_names))
-    ite._write_df(ws_detail, df_detail)
-    _apply_diff_formatting(ws_detail, df_detail, '03b_상세비교')
+    ws = wb.create_sheet(ite._unique_sheet_name(wb, '03_매칭공간_객체비교', used_names))
+    ite._write_df(ws, df_compare)
 
     if status_cb:
         status_cb('미매칭 공간 객체 요약 계산 중...')
