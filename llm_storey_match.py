@@ -36,6 +36,17 @@ RPM/TPM/RPD 세 한도에 대한 대응 방식(중요 - 성격이 다름):
     "불필요한 호출을 만들지 않는 것"뿐이며, 이는 이미 (a) 파일쌍당 1회 호출 + (b) 세션
     캐싱으로 재실행시 재호출 방지로 구현되어 있다. RPD 초과 자체를 앱이 막을 수는 없고,
     초과시 명확한 에러 메시지로 안내하는 것까지가 이 모듈의 책임이다.
+
+    #   3. Similarity of the floor's space (room) composition, i.e. both the room COUNT and the
+#      room-TYPE names listed after "spaces:" for each storey (e.g. a floor whose spaces are
+#      mostly "Office"/"Meeting Room"/"Lobby" should not be matched to a floor whose spaces are
+#      "Parking"/"Mechanical Room" - the two are unlikely to be the same physical floor even if
+#      names or elevations look superficially similar). Room names may be in different languages
+#      or conventions across the two models, so match by likely real-world room TYPE, not exact
+#      string equality. Treat this as a supporting signal alongside 1 and 2, useful especially
+#      to break ties or catch cases where names/elevations conflict.
+
+
 """
 import json
 import threading
@@ -145,14 +156,6 @@ considering ALL of the following signals together:
      informative - e.g. both clearly mean "2nd floor" or both clearly mean "basement 1").
   2. Elevation similarity after the offset correction above (secondary/tie-breaking signal,
      and the main signal when names are ambiguous, generic, or uninformative, e.g. "Story_3").
-#   3. Similarity of the floor's space (room) composition, i.e. both the room COUNT and the
-#      room-TYPE names listed after "spaces:" for each storey (e.g. a floor whose spaces are
-#      mostly "Office"/"Meeting Room"/"Lobby" should not be matched to a floor whose spaces are
-#      "Parking"/"Mechanical Room" - the two are unlikely to be the same physical floor even if
-#      names or elevations look superficially similar). Room names may be in different languages
-#      or conventions across the two models, so match by likely real-world room TYPE, not exact
-#      string equality. Treat this as a supporting signal alongside 1 and 2, useful especially
-#      to break ties or catch cases where names/elevations conflict.
   3. 층 이름 간 문맥적 유사성과 해당 층을 전체 둘러싸는 폴리곤들을 중첩시켰을 때 상당 부분 겹치는 지를 고려할 것.
 
 Rules:
