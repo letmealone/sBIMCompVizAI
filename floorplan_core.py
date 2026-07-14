@@ -278,6 +278,17 @@ def get_elements_for_storey(storey_entity, classes=None):
     return elements
 
 
+def get_storey_space_summary(storey_entity, max_names=20):
+    """해당 층 IfcSpace들의 이름 구성을 경량으로 요약한다.
+    get_footprint_polygon() 등 지오메트리 계산(삼각분할)을 전혀 하지 않고 관계 순회만
+    하므로 매우 가볍다 - AI 층 매핑 프롬프트에서 '공간 구성 유사도' 신호로 쓰기 위한 것.
+    반환: {'count': 전체 공간 수, 'names': 이름 리스트(등장 순, 중복 포함, 최대 max_names개)}
+    """
+    spaces = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
+    names = [(sp.LongName or sp.Name or '(이름없음)') for sp in spaces]
+    return {'count': len(names), 'names': names[:max_names]}
+
+
 def build_storey_plan_data(storey_entity, tol=0.05):
     """해당 층의 Space + 구조요소들의 footprint 폴리곤을 미리 계산해 리스트로 반환.
     반환: {'spaces': [{'guid','name','polygon'}...], 'structural': [{'guid','class','name','polygon'}...]}

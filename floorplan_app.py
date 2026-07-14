@@ -104,7 +104,7 @@ def _match_spaces_cached(spaces_a, spaces_b, area_thresh, centroid_thresh, cache
 
 def _match_storeys_llm_cached(storeys_a, storeys_b, offset_mm, elevation_hint_mapping,
                                api_key, model_name, cache_tag, force_recompute=False,
-                               stream_placeholder=None):
+                               stream_placeholder=None, space_summary_a=None, space_summary_b=None):
     """AI(Gemini) 층 매핑 결과를 이 세션 안에서만 캐싱한다.
     같은 (파일쌍, 모델) 조합에 대해서는 st.rerun()이 아무리 반복돼도 API를 다시 부르지
     않는다 - force_recompute=True(실행 버튼을 눌렀을 때)일 때만 실제로 1회 호출한다.
@@ -125,6 +125,7 @@ def _match_storeys_llm_cached(storeys_a, storeys_b, offset_mm, elevation_hint_ma
             storeys_a, storeys_b, offset_mm, api_key,
             model_name=model_name, elevation_hint_mapping=elevation_hint_mapping,
             on_chunk=_on_chunk if stream_placeholder is not None else None,
+            space_summary_a=space_summary_a, space_summary_b=space_summary_b,
         )
     with st.spinner(f'Gemini({model_name})로 층 매핑 중... (API 호출 1회)'):
         return _session_cache(key, _compute)
@@ -420,13 +421,15 @@ with st.sidebar:
     st.divider()
     st.header('🤖 AI 층 매핑 (Gemini)')
     ai_floor_map_enabled = st.checkbox(
-        '층 이름의 문맥적 연관성 + 표고 유사도를 함께 고려해 AI로 층 매핑',
+        '층 이름의 문맥적 연관성 + 표고 유사도 + 공간(Space) 구성 유사도를 함께 고려해 AI로 층 매핑',
         value=False,
         help='표고(고도) 기반 매핑은 이미 항상 계산되어 배지로 표시되지만, 이 옵션은 '
-             '층 이름 자체의 의미(예: "1층"/"1F"/"Level 1"이 같은 층을 뜻함)까지 함께 '
-             '고려해 Gemini가 최종 매핑을 판단하도록 한다. IFC 파일쌍 하나당 API를 '
-             '정확히 1회만 호출하며(층별로 반복 호출하지 않음), 결과는 이 세션 안에서 '
-             '캐싱되어 화면이 새로고침돼도 재호출되지 않는다.',
+             '층 이름 자체의 의미(예: "1층"/"1F"/"Level 1"이 같은 층을 뜻함)와, 각 층에 '
+             '어떤 공간(Space)이 몇 개 있는지(예: 사무실/회의실 구성 vs 주차장/기계실 구성)까지 '
+             '함께 고려해 Gemini가 최종 매핑을 판단하도록 한다. 공간 구성 정보는 지오메트리 '
+             '계산 없이(관계 정보만으로) 뽑으므로 추가 연산 비용은 거의 없다. IFC 파일쌍 '
+             '하나당 API를 정확히 1회만 호출하며(층별로 반복 호출하지 않음), 결과는 이 '
+             '세션 안에서 캐싱되어 화면이 새로고침돼도 재호출되지 않는다.',
     )
     if ai_floor_map_enabled:
         _secret_key = ''
@@ -447,9 +450,10 @@ with st.sidebar:
             )
             st.session_state['_google_api_key'] = google_api_key
         llm_model_name = st.selectbox(
-            '모델', options=['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite'],
+            '모델', options=['gemini-3.1-flash-lite', 'gemini-2.5-flash-lite', 'gemini-2.5-flash'],
             index=0,
-            help='무료 할당량은 flash-lite 계열이 가장 넉넉한 경향입니다. 정확한 요청 한도(RPM/RPD)는 '
+            help='요청하신 대로 Gemini 3.1 Flash-Lite(GA)를 기본값으로 사용합니다. 무료 할당량은 '
+                 'flash-lite 계열이 가장 넉넉한 경향입니다. 정확한 요청 한도(RPM/RPD)는 '
                  'Google이 공식 문서에 고정 수치를 게시하지 않으므로 https://aistudio.google.com/rate-limit '
                  '에서 프로젝트별로 직접 확인하시기 바랍니다.',
         )
@@ -515,10 +519,15 @@ if file_a and file_b:
                     _stream_area = st.empty()
                     _stream_area.code('(응답 대기 중...)', language='json')
                 try:
+                    # 공간(Space) 이름 구성 요약: 지오메트리 계산 없이 관계 순회만 하므로
+                    # 층 개수가 많아도 비용이 거의 들지 않는다 (API 호출과 무관, 로컬 연산).
+                    _space_summary_a = {s['Name']: fc.get_storey_space_summary(s) for s in data_a['storeys']}
+                    _space_summary_b = {s['Name']: fc.get_storey_space_summary(s) for s in data_b['storeys']}
                     llm_floor_mapping, llm_floor_detail = _match_storeys_llm_cached(
                         data_a['storeys'], data_b['storeys'], floor_offset, floor_mapping,
                         google_api_key, llm_model_name, _llm_cache_tag,
                         force_recompute=run_llm_floor_map, stream_placeholder=_stream_area,
+                        space_summary_a=_space_summary_a, space_summary_b=_space_summary_b,
                     )
                     if _stream_area is not None:
                         st.caption('✅ 위 스트리밍 원본 응답을 파싱한 결과가 아래 배지/상세근거에 반영되었습니다.')
