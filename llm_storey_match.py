@@ -107,9 +107,34 @@ def _parse_response_text(text):
     return data['matches']
 
 
+def _finalize_matches(matches, storeys_b):
+    """모델이 반환한 matches 리스트를 검증/정리해 (mapping, detail)로 변환하는 공통 로직."""
+    valid_b_names = {s['Name'] for s in storeys_b}
+    mapping, detail = {}, []
+    used_b = set()
+    for m in matches:
+        a_name = m.get('a_name')
+        b_name = m.get('b_name')
+        if b_name is not None and (b_name not in valid_b_names or b_name in used_b):
+            # 존재하지 않는 이름을 지어냈거나 중복 매핑인 경우 방어적으로 null 처리
+            b_name = None
+        if b_name is not None:
+            used_b.add(b_name)
+        mapping[a_name] = b_name
+        detail.append({
+            'a_name': a_name,
+            'b_name': b_name,
+            'confidence': m.get('confidence', 'unknown'),
+            'reason': m.get('reason', ''),
+        })
+    return mapping, detail
+
+
 def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
-                       model_name=DEFAULT_MODEL, elevation_hint_mapping=None):
+                       model_name=DEFAULT_MODEL, elevation_hint_mapping=None, on_chunk=None):
     """Google Gemini API를 '정확히 1회' 호출해 두 IFC의 층을 이름 문맥+표고 유사도로 매핑한다.
+    스트리밍 응답을 사용하므로(요청 자체는 여전히 1건), on_chunk가 주어지면 텍스트가
+    도착하는 대로 on_chunk(누적된_텍스트_전체)를 호출해 화면에 실시간으로 보여줄 수 있다.
 
     Parameters
     ----------
@@ -125,12 +150,15 @@ def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
         floorplan_core.match_storeys()가 반환한 {A층이름: B층이름} 매핑(API 호출 없이
         결정론적으로 계산됨). 프롬프트에 힌트로 함께 넣어 LLM이 표고 유사도를 처음부터
         다시 추론하지 않고 이름 문맥과 결합해 판단하게 한다. None이면 힌트 없이 진행.
+    on_chunk : callable, optional
+        스트리밍 청크가 도착할 때마다 on_chunk(누적_텍스트)로 호출된다. 실시간 UI 표시용.
+        (파싱 전의 원본 JSON 텍스트가 그대로 전달되므로, 스트림 도중에는 불완전한 JSON일 수 있다.)
 
     Returns
     -------
     (mapping, detail) : ({A층이름: B층이름 or None}, [매칭 상세 dict, ...])
         detail의 각 원소: {'a_name', 'b_name', 'confidence', 'reason'}
-        API 호출은 이 함수 안에서 정확히 1회만 발생한다.
+        API 호출(스트리밍 요청 1건)은 이 함수 안에서 정확히 1회만 발생한다.
     """
     if not api_key:
         raise LlmStoreyMatchError("Google AI API Key가 비어 있습니다.")
@@ -145,10 +173,11 @@ def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
         ) from e
 
     prompt = _build_prompt(storeys_a, storeys_b, elevation_hint_mapping, offset_mm)
-
     client = genai.Client(api_key=api_key)
+
+    accumulated = []
     try:
-        response = client.models.generate_content(
+        stream = client.models.generate_content_stream(
             model=model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -156,35 +185,18 @@ def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
                 temperature=0.0,  # 매핑 작업은 결정론적일수록 좋음 (재현성)
             ),
         )
+        for chunk in stream:
+            piece = getattr(chunk, 'text', None)
+            if piece:
+                accumulated.append(piece)
+                if on_chunk is not None:
+                    on_chunk(''.join(accumulated))
     except Exception as e:
         raise LlmStoreyMatchError(f"Gemini API 호출 실패: {e}") from e
 
-    text = getattr(response, 'text', None)
-    if not text:
-        raise LlmStoreyMatchError(f"Gemini 응답에 text가 없습니다 (응답: {response})")
+    full_text = ''.join(accumulated)
+    if not full_text:
+        raise LlmStoreyMatchError("Gemini 응답이 비어 있습니다.")
 
-    matches = _parse_response_text(text)
-
-    valid_b_names = {s['Name'] for s in storeys_b}
-    mapping, detail = {}, []
-    used_b = set()
-    for m in matches:
-        a_name = m.get('a_name')
-        b_name = m.get('b_name')
-        if b_name is not None and b_name not in valid_b_names:
-            # 모델이 존재하지 않는 이름을 지어낸 경우 방어적으로 null 처리
-            b_name = None
-        if b_name is not None and b_name in used_b:
-            # 중복 매핑 방지: 먼저 나온 것을 우선하고 나머지는 null 처리
-            b_name = None
-        if b_name is not None:
-            used_b.add(b_name)
-        mapping[a_name] = b_name
-        detail.append({
-            'a_name': a_name,
-            'b_name': b_name,
-            'confidence': m.get('confidence', 'unknown'),
-            'reason': m.get('reason', ''),
-        })
-
-    return mapping, detail
+    matches = _parse_response_text(full_text)
+    return _finalize_matches(matches, storeys_b)

@@ -103,18 +103,28 @@ def _match_spaces_cached(spaces_a, spaces_b, area_thresh, centroid_thresh, cache
 
 
 def _match_storeys_llm_cached(storeys_a, storeys_b, offset_mm, elevation_hint_mapping,
-                               api_key, model_name, cache_tag, force_recompute=False):
+                               api_key, model_name, cache_tag, force_recompute=False,
+                               stream_placeholder=None):
     """AI(Gemini) 층 매핑 결과를 이 세션 안에서만 캐싱한다.
     같은 (파일쌍, 모델) 조합에 대해서는 st.rerun()이 아무리 반복돼도 API를 다시 부르지
-    않는다 - force_recompute=True(실행 버튼을 눌렀을 때)일 때만 실제로 1회 호출한다."""
+    않는다 - force_recompute=True(실행 버튼을 눌렀을 때)일 때만 실제로 1회 호출한다.
+    stream_placeholder가 주어지면(st.empty() 등) 실제로 API를 호출하는 이번 실행에 한해
+    Gemini의 스트리밍 응답을 실시간으로 그 자리에 표시한다(캐시 hit일 때는 호출 자체가
+    없으므로 표시할 것도 없다)."""
     key = f'llm_floor_{cache_tag}_{model_name}'
     full_key = _SESSION_CACHE_PREFIX + key
     if force_recompute and full_key in st.session_state:
         del st.session_state[full_key]
+
+    def _on_chunk(text_so_far):
+        if stream_placeholder is not None:
+            stream_placeholder.code(text_so_far, language='json')
+
     def _compute():
         return lsm.match_storeys_llm(
             storeys_a, storeys_b, offset_mm, api_key,
             model_name=model_name, elevation_hint_mapping=elevation_hint_mapping,
+            on_chunk=_on_chunk if stream_placeholder is not None else None,
         )
     with st.spinner(f'Gemini({model_name})로 층 매핑 중... (API 호출 1회)'):
         return _session_cache(key, _compute)
@@ -133,6 +143,11 @@ def _clear_all_caches():
 _FLOOR_BADGE_EMOJIS = ['🟦', '🟩', '🟧', '🟪', '🟥', '🟫', '🟨', '⬛']
 
 
+def _invert_mapping(mapping):
+    """{A이름: B이름} 매핑을 {B이름: A이름}으로 뒤집는다 (반대편 자동 선택에 사용)."""
+    return {b: a for a, b in mapping.items() if b}
+
+
 def _floor_pair_badges(mapping):
     """match_storeys()가 반환한 {A층이름: B층이름} 매핑으로 (a_badges, b_badges) 생성.
     같은 쌍은 항상 같은 색 이모지를 받는다 (공간 자동매핑의 번호배지와 같은 개념,
@@ -149,11 +164,18 @@ def _floor_pair_badges(mapping):
     return a_badges, b_badges
 
 
-def _render_floor_checkbox_tree(storeys, session_selected_key, key_prefix, badges=None):
+def _render_floor_checkbox_tree(storeys, session_selected_key, key_prefix, badges=None,
+                                 mapping_to_other=None, other_session_key=None,
+                                 other_sync_flag_key=None):
     """체크박스 목록으로 층 하나를 라디오처럼(하나만) 선택하게 하는 위젯.
     session_selected_key/key_prefix는 반드시 'left_'/'right_'로 시작해야 새 파일 업로드시
     _clear_all_caches()의 접두사 매칭으로 자동 초기화된다 (기존 IFC 정보 잔존 방지).
     반환: 현재 선택된 층 이름.
+
+    mapping_to_other/other_session_key/other_sync_flag_key: 주어지면(자동매핑 활성화시),
+    이 트리에서 새 층을 선택했을 때 매핑된(mapping_to_other[선택층]) 반대편 층도 함께
+    선택되도록 반대편의 session_state와 sync 플래그를 같이 갱신한다. 매핑에 대응 층이
+    없으면(None) 반대편은 그대로 둔다.
 
     주의(버그 수정 이력): 체크박스 생성 '직전에' 매번 강제로 상태를 동기화하면, 사용자가
     방금 클릭한 값을 코드가 읽기도 전에 덮어써버려 클릭이 무시되는 문제가 있었다.
@@ -186,8 +208,15 @@ def _render_floor_checkbox_tree(storeys, session_selected_key, key_prefix, badge
 
     newly_checked = [n for n, c in checked_states.items() if c and n != current]
     if newly_checked:
-        st.session_state[session_selected_key] = newly_checked[0]
+        new_name = newly_checked[0]
+        st.session_state[session_selected_key] = new_name
         st.session_state[sync_flag_key] = True
+        if mapping_to_other is not None and other_session_key is not None:
+            other_name = mapping_to_other.get(new_name)
+            if other_name:
+                st.session_state[other_session_key] = other_name
+                if other_sync_flag_key:
+                    st.session_state[other_sync_flag_key] = True
         st.rerun()
     elif checked_states.get(current) is False:
         # 현재 선택된 항목의 체크를 사용자가 해제하려 한 경우 -> 최소 1개는 선택되어야 하므로
@@ -478,22 +507,37 @@ if file_a and file_b:
             _llm_cache_tag = f'{file_hash_a}_{file_hash_b}'
             _llm_full_key = _SESSION_CACHE_PREFIX + f'llm_floor_{_llm_cache_tag}_{llm_model_name}'
             if run_llm_floor_map or _llm_full_key in st.session_state:
+                # 버튼을 지금 막 눌러 실제로 API를 호출하는 경우에만 실시간 스트리밍 영역을 띄운다
+                # (캐시 hit일 때는 호출 자체가 없으니 보여줄 스트림도 없다).
+                _stream_area = None
+                if run_llm_floor_map:
+                    st.markdown('#### 🔎 Gemini 실시간 추론 진행')
+                    _stream_area = st.empty()
+                    _stream_area.code('(응답 대기 중...)', language='json')
                 try:
                     llm_floor_mapping, llm_floor_detail = _match_storeys_llm_cached(
                         data_a['storeys'], data_b['storeys'], floor_offset, floor_mapping,
                         google_api_key, llm_model_name, _llm_cache_tag,
-                        force_recompute=run_llm_floor_map,
+                        force_recompute=run_llm_floor_map, stream_placeholder=_stream_area,
                     )
+                    if _stream_area is not None:
+                        st.caption('✅ 위 스트리밍 원본 응답을 파싱한 결과가 아래 배지/상세근거에 반영되었습니다.')
                 except lsm.LlmStoreyMatchError as e:
                     st.sidebar.error(f'AI 층 매핑 실패: {e}')
 
     # 배지 표시는 AI 매핑 결과가 있으면 그것을 우선 사용하고, 없으면 표고 기반 매핑을 사용
     _badge_source = llm_floor_mapping if llm_floor_mapping is not None else floor_mapping
+    _badge_source_inv = _invert_mapping(_badge_source)
     floor_badges_a, floor_badges_b = _floor_pair_badges(_badge_source)
 
     with st.sidebar:
         st.divider()
         st.header('🏢 층 선택')
+        floor_auto_follow = st.checkbox(
+            '매핑된 층 자동 함께 선택', value=True,
+            help='한쪽에서 층을 체크하면, 배지가 같은 색인(매핑된) 반대편 층도 자동으로 '
+                 '함께 선택됩니다. 대응되는 층이 없는(⬜) 경우에는 반대편은 그대로 둡니다.',
+        )
         if llm_floor_mapping is not None:
             st.caption(
                 '같은 색 배지 = AI(이름 문맥 + 표고 유사도)가 매핑한 층입니다. '
@@ -509,10 +553,16 @@ if file_a and file_b:
             )
         with st.expander('전문가 IFC', expanded=True):
             selected_a_name = _render_floor_checkbox_tree(
-                data_a['storeys'], 'left_selected_floor', 'left_floor_cb', badges=floor_badges_a)
+                data_a['storeys'], 'left_selected_floor', 'left_floor_cb', badges=floor_badges_a,
+                mapping_to_other=(_badge_source if floor_auto_follow else None),
+                other_session_key='right_selected_floor',
+                other_sync_flag_key='right_floor_cb__sync_pending')
         with st.expander('AI IFC', expanded=True):
             selected_b_name = _render_floor_checkbox_tree(
-                data_b['storeys'], 'right_selected_floor', 'right_floor_cb', badges=floor_badges_b)
+                data_b['storeys'], 'right_selected_floor', 'right_floor_cb', badges=floor_badges_b,
+                mapping_to_other=(_badge_source_inv if floor_auto_follow else None),
+                other_session_key='left_selected_floor',
+                other_sync_flag_key='left_floor_cb__sync_pending')
 
     # 층 선택이 바뀌면 이전 선택된 공간 정보는 초기화
     _cur_key = (selected_a_name, selected_b_name)
