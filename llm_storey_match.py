@@ -145,14 +145,15 @@ considering ALL of the following signals together:
      informative - e.g. both clearly mean "2nd floor" or both clearly mean "basement 1").
   2. Elevation similarity after the offset correction above (secondary/tie-breaking signal,
      and the main signal when names are ambiguous, generic, or uninformative, e.g. "Story_3").
-  3. Similarity of the floor's space (room) composition, i.e. both the room COUNT and the
-     room-TYPE names listed after "spaces:" for each storey (e.g. a floor whose spaces are
-     mostly "Office"/"Meeting Room"/"Lobby" should not be matched to a floor whose spaces are
-     "Parking"/"Mechanical Room" - the two are unlikely to be the same physical floor even if
-     names or elevations look superficially similar). Room names may be in different languages
-     or conventions across the two models, so match by likely real-world room TYPE, not exact
-     string equality. Treat this as a supporting signal alongside 1 and 2, useful especially
-     to break ties or catch cases where names/elevations conflict.
+#   3. Similarity of the floor's space (room) composition, i.e. both the room COUNT and the
+#      room-TYPE names listed after "spaces:" for each storey (e.g. a floor whose spaces are
+#      mostly "Office"/"Meeting Room"/"Lobby" should not be matched to a floor whose spaces are
+#      "Parking"/"Mechanical Room" - the two are unlikely to be the same physical floor even if
+#      names or elevations look superficially similar). Room names may be in different languages
+#      or conventions across the two models, so match by likely real-world room TYPE, not exact
+#      string equality. Treat this as a supporting signal alongside 1 and 2, useful especially
+#      to break ties or catch cases where names/elevations conflict.
+  3. 층 이름과 해당 층을 전체 둘러싸는 폴리곤들을 중첩시켰을 때 상당 부분 겹치는 지를 동시에 고려할 것.
 
 Rules:
   - Each A storey maps to at most one B storey, and each B storey is used at most once.
