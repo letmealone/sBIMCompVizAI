@@ -19,14 +19,11 @@ ifcopenshell, numpy, pandas, openpyxl (ifc_to_excel.py 의존성)
 import os
 import tempfile
 import hashlib
-import zipfile
 
 import streamlit as st
 
 import floorplan_core as fc
 import llm_storey_match as lsm
-import ifc_to_excel as ite
-import comparison_export as cmpexp
 
 st.set_page_config(layout='wide', page_title='IFC 평면도 비교')
 st.title('IFC 평면도 비교 (전문가 vs AI)')
@@ -87,14 +84,12 @@ def _load_ifc_cached(file_bytes, filename, file_hash):
         return _session_cache(f'ifc_{file_hash}', _compute)
 
 
-def _build_plan_cached(storeys, storey_name, cache_tag, wall_classification=None):
+def _build_plan_cached(storeys, storey_name, cache_tag):
     """층별 평면 지오메트리를 이 세션 안에서만 캐싱.
-    cache_tag: 파일해시 등을 포함한 문자열로, 같은 층 이름이라도 파일이 다르면 구분되게 한다.
-    wall_classification: fc.load_ifc()가 반환한 벽 내/외벽 판정 dict. 부재 hover 정보에
-    포함시키기 위해 build_storey_plan_data로 그대로 전달한다."""
+    cache_tag: 파일해시 등을 포함한 문자열로, 같은 층 이름이라도 파일이 다르면 구분되게 한다."""
     def _compute():
         storey = next(s for s in storeys if s['Name'] == storey_name)
-        return fc.build_storey_plan_data(storey, wall_classification=wall_classification)
+        return fc.build_storey_plan_data(storey)
     with st.spinner('해당 층 도면 지오메트리 계산 중...'):
         return _session_cache(f'plan_{cache_tag}_{storey_name}', _compute)
 
@@ -241,11 +236,6 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
         return None, None
 
     st.caption(f"공간 {len(plan['spaces'])}개 · 구조요소 {len(plan['structural'])}개  (층: {storey_name})")
-    st.caption(
-        '🖱️ **초록색(또는 매칭 배지 색)으로 채워진 공간 영역 안쪽 아무 곳이나 클릭**하면 선택됩니다. '
-        '벽/기둥 등 회색 부재는 클릭이 아니라 **마우스를 올리면(hover)** 치수·면적·재질 정보가 보입니다. '
-        '클릭이 잘 안 되면 아래 드롭다운에서 직접 선택하세요.'
-    )
 
     selected_key = f'{session_prefix}_selected_guid'
     selected_guid = st.session_state.get(selected_key)
@@ -429,23 +419,6 @@ with st.sidebar:
         area_thresh = centroid_thresh = None
 
     st.divider()
-    st.header('📊 엑셀 내보내기')
-    st.caption(
-        '전문가/AI IFC 각각의 전체 부재 추출 결과(ifc_to_excel.py)와, 층/공간 매칭·객체 비교 '
-        '결과를 엑셀 3개로 만들어 zip 하나로 묶어 내려받습니다. 공간 매칭은 화면에 보이는 '
-        '층 하나가 아니라 **전체 층**에 대해 다시 계산하므로, 층이 많으면 시간이 걸릴 수 있습니다.'
-    )
-    export_area_thresh = st.number_input(
-        '내보내기용 면적 오차 임계값 (㎡)', min_value=0.0,
-        value=area_thresh if area_thresh else 2.0, step=0.5, key='export_area_thresh',
-    )
-    export_centroid_thresh = st.number_input(
-        '내보내기용 centroid 오차 임계값 (m)', min_value=0.0,
-        value=centroid_thresh if centroid_thresh else 1.0, step=0.1, key='export_centroid_thresh',
-    )
-    run_export = st.button('📥 비교 엑셀(zip) 생성', width='stretch')
-
-    st.divider()
     st.header('🤖 AI 층 매핑 (Gemini)')
     ai_floor_map_enabled = st.checkbox(
         '층 이름의 문맥적 연관성 + 표고 유사도 + 공간(Space) 구성 유사도를 함께 고려해 AI로 층 매핑',
@@ -572,58 +545,6 @@ if file_a and file_b:
     _badge_source_inv = _invert_mapping(_badge_source)
     floor_badges_a, floor_badges_b = _floor_pair_badges(_badge_source)
 
-    # ---------------------------------------------------------------
-    # 엑셀 내보내기 실행 (버튼을 눌렀을 때만 - 무거운 전체 층 지오메트리 계산 포함)
-    # ---------------------------------------------------------------
-    if run_export:
-        export_status = st.empty()
-
-        def _export_status_cb(msg):
-            export_status.caption(f'⏳ {msg}')
-
-        try:
-            with st.spinner('전문가(A) IFC 전체 부재 엑셀 생성 중...'):
-                _tmp_a_path = tempfile.NamedTemporaryFile(suffix='.ifc', delete=False).name
-                with open(_tmp_a_path, 'wb') as fpa:
-                    fpa.write(file_a.getvalue())
-                out_a = ite.extract_ifc_to_excel(
-                    _tmp_a_path, os.path.join(tempfile.gettempdir(), f'A_{file_hash_a}_추출.xlsx'))
-
-            with st.spinner('AI(B) IFC 전체 부재 엑셀 생성 중...'):
-                _tmp_b_path = tempfile.NamedTemporaryFile(suffix='.ifc', delete=False).name
-                with open(_tmp_b_path, 'wb') as fpb:
-                    fpb.write(file_b.getvalue())
-                out_b = ite.extract_ifc_to_excel(
-                    _tmp_b_path, os.path.join(tempfile.gettempdir(), f'B_{file_hash_b}_추출.xlsx'))
-
-            wb_compare = cmpexp.build_comparison_workbook(
-                data_a, data_b, _badge_source,
-                is_llm_floor_mapping=(llm_floor_mapping is not None), llm_floor_detail=llm_floor_detail,
-                area_thresh=export_area_thresh, centroid_thresh=export_centroid_thresh,
-                status_cb=_export_status_cb,
-            )
-            out_compare = os.path.join(tempfile.gettempdir(), f'비교결과_{file_hash_a}_{file_hash_b}.xlsx')
-            wb_compare.save(out_compare)
-            export_status.empty()
-
-            zip_path = os.path.join(tempfile.gettempdir(), f'IFC비교_{file_hash_a}_{file_hash_b}.zip')
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                zf.write(out_a, arcname='01_전문가IFC_추출.xlsx')
-                zf.write(out_b, arcname='02_AI_IFC_추출.xlsx')
-                zf.write(out_compare, arcname='03_층공간매칭_비교결과.xlsx')
-            with open(zip_path, 'rb') as fz:
-                st.session_state['_export_zip_bytes'] = fz.read()
-            st.success('✅ 엑셀 생성 완료! 사이드바 아래 다운로드 버튼으로 받으세요.')
-        except Exception as e:
-            st.error(f'엑셀 생성 중 오류가 발생했습니다: {e}')
-
-    if st.session_state.get('_export_zip_bytes'):
-        with st.sidebar:
-            st.download_button(
-                '⬇️ 비교 결과 zip 다운로드', data=st.session_state['_export_zip_bytes'],
-                file_name='IFC_비교결과.zip', mime='application/zip', width='stretch',
-            )
-
     with st.sidebar:
         st.divider()
         st.header('🏢 층 선택')
@@ -670,10 +591,8 @@ if file_a and file_b:
     st.markdown(f"### 비교 중: 전문가 `{selected_a_name}` ↔ AI `{selected_b_name}`")
     st.caption('층은 왼쪽 사이드바 "🏢 층 선택"에서 바꿀 수 있습니다.')
 
-    plan_a = _build_plan_cached(data_a['storeys'], selected_a_name, f'left_{file_hash_a}',
-                                 wall_classification=data_a['wall_classification'])
-    plan_b = _build_plan_cached(data_b['storeys'], selected_b_name, f'right_{file_hash_b}',
-                                 wall_classification=data_b['wall_classification'])
+    plan_a = _build_plan_cached(data_a['storeys'], selected_a_name, f'left_{file_hash_a}')
+    plan_b = _build_plan_cached(data_b['storeys'], selected_b_name, f'right_{file_hash_b}')
 
     space_a_to_b, space_b_to_a = {}, {}
     pair_labels_a, pair_labels_b = None, None

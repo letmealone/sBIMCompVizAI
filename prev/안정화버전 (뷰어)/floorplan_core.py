@@ -289,48 +289,10 @@ def get_storey_space_summary(storey_entity, max_names=20):
     return {'count': len(names), 'names': names[:max_names]}
 
 
-def get_element_hover_info(ent, wall_classification=None):
-    """평면도에서 부재 위에 마우스를 올렸을 때 보여줄 요약정보(HTML, <br> 개행) 생성.
-    치수/면적/재질 추출은 ifc_to_excel.py에 이미 있는 로직(좌표 기반 직접계산, Pset 폴백
-    포함)을 그대로 재사용해 엑셀 추출 결과와 수치가 항상 일치하도록 한다(중복 구현 방지).
-    wall_classification: ifc_to_excel._determine_wall_classification() 반환값. 주어지고
-    이 부재가 벽이면 내/외벽 판정 결과도 함께 표시한다."""
-    lines = [f"{ent.is_a()} {ent.Name or '(이름없음)'}".strip()]
-    try:
-        dims = ite._dimension_columns(ent)
-        dim_parts = [f"{axis}={dims[f'치수_{axis}(m)']}m"
-                     for axis in ('X', 'Y', 'Z') if dims.get(f'치수_{axis}(m)') is not None]
-        if dim_parts:
-            lines.append('치수: ' + ', '.join(dim_parts) + f" ({dims.get('치수산출방식')})")
-    except Exception:
-        pass
-    try:
-        if ent.is_a() in ite.AREA_TARGET_CLASSES:
-            flat = ite._flatten_psets(ent)
-            area_info = ite._area_columns(ent, flat)
-            if area_info.get('면적(㎡)') is not None:
-                lines.append(f"면적: {area_info['면적(㎡)']}㎡ ({area_info.get('면적산출방식')})")
-    except Exception:
-        pass
-    try:
-        material = ite._get_material(ent)
-        if material:
-            lines.append(f"재질: {material}")
-    except Exception:
-        pass
-    if wall_classification and ent.GlobalId in wall_classification:
-        label, reason = wall_classification[ent.GlobalId]
-        lines.append(f"내/외벽 판정: {label}")
-    return "<br>".join(lines)
-
-
-def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None):
+def build_storey_plan_data(storey_entity, tol=0.05):
     """해당 층의 Space + 구조요소들의 footprint 폴리곤을 미리 계산해 리스트로 반환.
-    반환: {'spaces': [{'guid','name','polygon'}...],
-           'structural': [{'guid','class','name','polygon','hover'}...]}
-    (지오메트리 계산은 비용이 있으므로 앱에서 층 변경시에만 1회 호출하도록 캐싱 권장.
-    hover 텍스트도 여기서 미리 만들어 캐싱 대상에 포함시킨다 - 매 렌더링마다 다시
-    치수/속성을 파싱하면 비용이 반복되므로 층 변경시 1회만 계산되게 하기 위함)"""
+    반환: {'spaces': [{'guid','name','polygon'}...], 'structural': [{'guid','class','name','polygon'}...]}
+    (지오메트리 계산은 비용이 있으므로 앱에서 층 변경시에만 1회 호출하도록 캐싱 권장)"""
     spaces_raw = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
     structural_raw = get_elements_for_storey(storey_entity, classes=set(PLAN_STRUCTURAL_CLASSES))
 
@@ -346,9 +308,7 @@ def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None):
         poly = get_footprint_polygon(el, tol=tol)
         if poly is None:
             continue
-        hover = get_element_hover_info(el, wall_classification=wall_classification)
-        structural.append({'guid': el.GlobalId, 'class': el.is_a(), 'name': el.Name or '',
-                            'polygon': poly, 'hover': hover})
+        structural.append({'guid': el.GlobalId, 'class': el.is_a(), 'name': el.Name or '', 'polygon': poly})
 
     return {'spaces': spaces, 'structural': structural}
 
@@ -659,8 +619,7 @@ def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
         fig.add_trace(go.Scatter(
             x=xs, y=ys, mode='lines', fill='toself',
             line=dict(width=line_w, color=line_c), fillcolor=fill_c,
-            hoverinfo='text',
-            text=el.get('hover') or f"{el['class']} {el['name']}".strip(),
+            hoverinfo='text', text=f"{el['class']} {el['name']}".strip(),
             showlegend=False,
         ))
 
