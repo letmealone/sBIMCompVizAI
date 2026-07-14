@@ -156,7 +156,7 @@ considering ALL of the following signals together:
      informative - e.g. both clearly mean "2nd floor" or both clearly mean "basement 1").
   2. Elevation similarity after the offset correction above (secondary/tie-breaking signal,
      and the main signal when names are ambiguous, generic, or uninformative, e.g. "Story_3").
-  3. 층 이름 간 문맥적 유사성과 해당 층을 전체 둘러싸는 폴리곤들을 중첩시켰을 때 상당 부분 겹치는 지를 고려할 것.
+  3. 층 이름 간 문맥적 유사성과 해당 층의 전체 면적의 유사성을 고려할 것.
 
 Rules:
   - Each A storey maps to at most one B storey, and each B storey is used at most once.
