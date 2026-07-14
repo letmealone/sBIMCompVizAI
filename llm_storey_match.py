@@ -153,7 +153,7 @@ considering ALL of the following signals together:
 #      or conventions across the two models, so match by likely real-world room TYPE, not exact
 #      string equality. Treat this as a supporting signal alongside 1 and 2, useful especially
 #      to break ties or catch cases where names/elevations conflict.
-  3. 층 이름과 해당 층을 전체 둘러싸는 폴리곤들을 중첩시켰을 때 상당 부분 겹치는 지를 동시에 고려할 것.
+  3. 층 이름 간 문맥적 유사성과 해당 층을 전체 둘러싸는 폴리곤들을 중첩시켰을 때 상당 부분 겹치는 지를 고려할 것.
 
 Rules:
   - Each A storey maps to at most one B storey, and each B storey is used at most once.
