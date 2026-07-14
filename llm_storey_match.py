@@ -20,16 +20,76 @@ Google Gemini API(google-genai SDK)를 사용해, 두 IFC의 층(IfcBuildingStor
     신규 통합 SDK인 `google-genai` 패키지를 사용한다 (`pip install google-genai`).
   - 무료 할당량의 정확한 RPM/RPD 수치는 Google 공식 문서(ai.google.dev/gemini-api/docs/rate-limits)에
     더 이상 고정 테이블로 게시되지 않고, "Google AI Studio에서 프로젝트별로 확인"하도록
-    안내되어 있다. 즉, 이 파일 어디에도 "무료 한도는 하루 N회다" 같은 확정적 수치는
-    적어두지 않는다(서드파티 블로그마다 수치가 다르고 신뢰도가 낮음) - 실제 한도는
-    https://aistudio.google.com/rate-limit 에서 직접 확인 필요.
-  - 여러 출처에서 공통적으로 확인되는 사실은 "Flash-Lite 계열 모델이 Flash/Pro보다
-    무료 티어 요청 한도가 더 넉넉하다"는 경향뿐이라, 기본 모델을 flash-lite 계열로 둔다.
+    안내되어 있다. 사용자가 자신의 프로젝트 기준으로 직접 확인한 gemini-3.1-flash-lite
+    수치(RPM 15 / TPM 250,000 / RPD 500)를 아래 기본값으로 사용한다.
+
+RPM/TPM/RPD 세 한도에 대한 대응 방식(중요 - 성격이 다름):
+  - RPM(분당 요청수): 이 프로세스 안에서 클라이언트측 슬라이딩 윈도우로 실제 방지 가능
+    (아래 _throttle_for_rpm). 다만 Streamlit 앱이 여러 프로세스/컨테이너로 스케일아웃되는
+    배포라면 프로세스별로 카운터가 나뉘어 정확도가 떨어진다(단일 프로세스 배포 기준의
+    최선의 방어).
+  - TPM(분당 토큰수): 이 앱의 프롬프트는 층 개수×층당 표시 공간 이름 개수(각각 상한을
+    이미 두고 있음)에 비례하므로 250,000 토큰에 걸릴 가능성은 실제로 낮다. 그래도 극단적으로
+    층/공간이 많은 IFC를 위해 안전판(문자수 상한 초과시 공간 이름 목록을 더 줄여 재구성)을 둔다.
+  - RPD(일일 요청수): API 키/프로젝트 단위로 걸리는 한도라 이 앱만 통제할 수 있는 값이
+    아니다(같은 키를 쓰는 모든 사용자의 호출이 합산됨). 앱 차원에서 할 수 있는 것은
+    "불필요한 호출을 만들지 않는 것"뿐이며, 이는 이미 (a) 파일쌍당 1회 호출 + (b) 세션
+    캐싱으로 재실행시 재호출 방지로 구현되어 있다. RPD 초과 자체를 앱이 막을 수는 없고,
+    초과시 명확한 에러 메시지로 안내하는 것까지가 이 모듈의 책임이다.
 """
 import json
+import threading
+import time
 
 
 DEFAULT_MODEL = 'gemini-3.1-flash-lite'
+
+# 사용자가 Google AI Studio에서 직접 확인한 gemini-3.1-flash-lite 무료 티어 한도.
+# (Google 공식 문서는 고정 수치를 게시하지 않으므로, 실제 배포 후 값이 바뀌었다면
+#  아래 상수만 갱신하면 된다.)
+DEFAULT_RPM_LIMIT = 15
+DEFAULT_TPM_LIMIT = 250_000
+DEFAULT_RPD_LIMIT = 500  # 참고용 표시에만 사용 - 이 프로세스가 강제할 수 있는 값이 아님
+
+# RPM 클라이언트측 스로틀링용 전역 상태. 프로세스(=보통 배포된 Streamlit 서버 1개) 안의
+# 모든 세션이 공유해야 의미가 있다 - 세션별로 따로 두면 사용자 3명이 각자 1회씩 눌러도
+# 실제로는 API 프로젝트 한도(RPM)를 합산해서 초과할 수 있기 때문이다.
+_RPM_LOCK = threading.Lock()
+_RPM_CALL_TIMES = []  # 최근 호출 시각들(time.monotonic() 기준, 초)
+
+
+def _throttle_for_rpm(max_rpm=DEFAULT_RPM_LIMIT, safety_margin=2, max_wait_s=75):
+    """직전 60초 안에 이미 (max_rpm - safety_margin)회 호출했다면, 여유가 생길 때까지
+    대기한다(최대 max_wait_s초). safety_margin은 이 카운터가 완벽하지 않다는 점
+    (여러 프로세스 배포시 부정확) 을 감안한 안전 여유분이다."""
+    limit = max(1, max_rpm - safety_margin)
+    deadline = time.monotonic() + max_wait_s
+    while True:
+        with _RPM_LOCK:
+            now = time.monotonic()
+            while _RPM_CALL_TIMES and now - _RPM_CALL_TIMES[0] > 60:
+                _RPM_CALL_TIMES.pop(0)
+            if len(_RPM_CALL_TIMES) < limit:
+                _RPM_CALL_TIMES.append(now)
+                return
+            wait_s = 60 - (now - _RPM_CALL_TIMES[0]) + 0.5
+        if time.monotonic() + wait_s > deadline:
+            # 너무 오래 기다려야 하면(다른 세션들이 계속 호출 중) 포기하고 예외로 알린다 -
+            # Streamlit 요청을 무한정 블로킹하는 것보다 사용자에게 재시도를 안내하는 편이 낫다.
+            raise LlmStoreyMatchError(
+                f"다른 세션의 요청이 많아 RPM 한도({max_rpm}/분) 여유가 나지 않습니다. "
+                "잠시 후 다시 시도해주세요."
+            )
+        time.sleep(max(min(wait_s, 5.0), 0.5))
+
+
+def _estimate_token_count(text):
+    """대략적인 토큰수 추정치(공식 카운터가 아님 - countTokens API를 별도로 부르면
+    호출 횟수가 늘어나므로 로컬 휴리스틱만 사용). 영문은 대략 4자/토큰, 한글 등 비영문은
+    보수적으로 2자/토큰으로 가정해 다소 과대추정되도록(=안전한 쪽으로) 잡는다."""
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    return ascii_chars / 4 + non_ascii_chars / 2
 
 
 class LlmStoreyMatchError(RuntimeError):
@@ -38,21 +98,24 @@ class LlmStoreyMatchError(RuntimeError):
 
 
 def _build_prompt(storeys_a, storeys_b, elevation_hint_mapping, offset_mm,
-                   space_summary_a=None, space_summary_b=None):
+                   space_summary_a=None, space_summary_b=None, space_name_cap=15):
     """LLM에 보낼 프롬프트 문자열 생성. 토큰 절약을 위해 불필요한 필드는 넣지 않는다.
     space_summary_a/b: {층이름: {'count': int, 'names': [str, ...]}} (get_storey_space_summary 반환값들의 dict).
-    None이면 공간 정보 없이(이름+표고만으로) 진행한다."""
+    None이면 공간 정보 없이(이름+표고만으로) 진행한다.
+    space_name_cap: 층 하나당 프롬프트에 나열할 공간 이름 최대 개수 (TPM 안전판에서 축소용)."""
     def _fmt(storeys, space_summary):
         lines = []
         for s in storeys:
             elev = s['Elevation']
             elev_text = f"{elev:.0f}mm" if elev is not None else "unknown"
             info = (space_summary or {}).get(s['Name'])
-            if info and info['count'] > 0:
-                sample = ", ".join(info['names'][:15])
-                extra = info['count'] - min(15, len(info['names']))
+            if info and info['count'] > 0 and space_name_cap > 0:
+                sample = ", ".join(info['names'][:space_name_cap])
+                extra = info['count'] - min(space_name_cap, len(info['names']))
                 more = f", +{extra} more" if extra > 0 else ""
                 space_text = f", spaces: {info['count']} total [{sample}{more}]"
+            elif info and info['count'] > 0:
+                space_text = f", spaces: {info['count']} total (names omitted)"
             else:
                 space_text = ", spaces: none/unknown"
             lines.append(f"- \"{s['Name']}\" (elevation={elev_text}{space_text})")
@@ -109,6 +172,23 @@ Return ONLY a JSON object with this exact shape, no markdown fences, no extra te
     return prompt
 
 
+def _build_prompt_within_tpm_budget(storeys_a, storeys_b, elevation_hint_mapping, offset_mm,
+                                     space_summary_a, space_summary_b, tpm_limit):
+    """TPM 안전판: 기본(공간이름 15개) 프롬프트가 예상 토큰수 기준으로 TPM 한도의 60%를
+    넘으면(출력 토큰/오차 여유분 확보), 공간 이름 표시 개수를 15->6->2->0(개수만 표시)
+    순으로 줄여가며 다시 만든다. 지오메트리 재계산이 필요 없는 순수 문자열 작업이라 비용은
+    거의 없다. 실제로 이 앱의 프롬프트 크기(층수 x 층당 공간이름 상한)로는 TPM 250,000에
+    걸릴 가능성이 낮지만, 극단적으로 층/공간이 많은 IFC를 위한 방어적 장치다."""
+    budget = tpm_limit * 0.6
+    for cap in (15, 6, 2, 0):
+        prompt = _build_prompt(storeys_a, storeys_b, elevation_hint_mapping, offset_mm,
+                                space_summary_a=space_summary_a, space_summary_b=space_summary_b,
+                                space_name_cap=cap)
+        if _estimate_token_count(prompt) <= budget:
+            return prompt, cap
+    return prompt, cap  # 그래도 넘으면(비정상적으로 층이 많은 경우) 최소 형태로라도 시도
+
+
 def _parse_response_text(text):
     """모델 응답에서 JSON을 안전하게 파싱. 코드펜스가 붙어 나오는 경우까지 방어적으로 처리."""
     cleaned = text.strip()
@@ -152,11 +232,22 @@ def _finalize_matches(matches, storeys_b):
 
 def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
                        model_name=DEFAULT_MODEL, elevation_hint_mapping=None, on_chunk=None,
-                       space_summary_a=None, space_summary_b=None):
-    """Google Gemini API를 '정확히 1회' 호출해 두 IFC의 층을 이름 문맥+표고 유사도+공간
-    구성 유사도를 함께 고려해 매핑한다. 스트리밍 응답을 사용하므로(요청 자체는 여전히
-    1건), on_chunk가 주어지면 텍스트가 도착하는 대로 on_chunk(누적된_텍스트_전체)를
-    호출해 화면에 실시간으로 보여줄 수 있다.
+                       space_summary_a=None, space_summary_b=None,
+                       rpm_limit=DEFAULT_RPM_LIMIT, tpm_limit=DEFAULT_TPM_LIMIT, max_retries=2):
+    """Google Gemini API를 '정확히 1회'(요청 자체는, 429 재시도가 있는 경우 최대
+    max_retries회까지) 호출해 두 IFC의 층을 이름 문맥+표고 유사도+공간 구성 유사도를
+    함께 고려해 매핑한다. 스트리밍 응답을 사용하므로, on_chunk가 주어지면 텍스트가
+    도착하는 대로 on_chunk(누적된_텍스트_전체)를 호출해 화면에 실시간으로 보여줄 수 있다.
+
+    RPM/TPM/RPD 세 한도 대응(중요):
+      - RPM: 호출 직전 _throttle_for_rpm()으로 클라이언트측에서 실제로 방지한다
+        (같은 프로세스 안의 모든 세션이 공유하는 슬라이딩 윈도우).
+      - TPM: 프롬프트 예상 토큰수가 tpm_limit의 60%를 넘으면 공간 이름 표시 개수를
+        자동으로 줄여 다시 만든다(_build_prompt_within_tpm_budget).
+      - RPD: 앱이 강제할 수 없는 값이다(API 키/프로젝트 단위 합산). 초과시 429 에러가
+        나면 재시도해도 소용없으므로(다음날 태평양시간 자정까지 대기 필요) 재시도하지
+        않고 바로 그 사실을 담은 에러 메시지를 낸다. RPM/TPM성 429는 일시적이므로
+        지수 백오프로 최대 max_retries회 재시도한다.
 
     Parameters
     ----------
@@ -177,6 +268,11 @@ def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
         (Space) 개수와 이름 구성을 프롬프트에 포함시켜, 층 이름/표고가 모호하거나
         서로 충돌할 때 '이 층에 어떤 종류의 공간이 몇 개 있는가'까지 함께 판단 근거로
         쓰도록 한다. 지오메트리 계산이 필요 없는 값이라 추가 비용이 거의 없다.
+    rpm_limit, tpm_limit : int
+        이 모델의 실제 분당 요청/토큰 한도(Google AI Studio에서 확인한 값을 그대로 사용).
+    max_retries : int
+        RPM/TPM성 일시적 429 오류에 대한 최대 재시도 횟수(지수 백오프). RPD(일일) 초과로
+        보이는 429는 재시도하지 않는다.
     on_chunk : callable, optional
         스트리밍 청크가 도착할 때마다 on_chunk(누적_텍스트)로 호출된다. 실시간 UI 표시용.
         (파싱 전의 원본 JSON 텍스트가 그대로 전달되므로, 스트림 도중에는 불완전한 JSON일 수 있다.)
@@ -185,7 +281,6 @@ def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
     -------
     (mapping, detail) : ({A층이름: B층이름 or None}, [매칭 상세 dict, ...])
         detail의 각 원소: {'a_name', 'b_name', 'confidence', 'reason'}
-        API 호출(스트리밍 요청 1건)은 이 함수 안에서 정확히 1회만 발생한다.
     """
     if not api_key:
         raise LlmStoreyMatchError("Google AI API Key가 비어 있습니다.")
@@ -199,32 +294,63 @@ def match_storeys_llm(storeys_a, storeys_b, offset_mm, api_key,
             "`pip install google-genai`로 설치해주세요."
         ) from e
 
-    prompt = _build_prompt(storeys_a, storeys_b, elevation_hint_mapping, offset_mm,
-                            space_summary_a=space_summary_a, space_summary_b=space_summary_b)
+    prompt, _used_cap = _build_prompt_within_tpm_budget(
+        storeys_a, storeys_b, elevation_hint_mapping, offset_mm,
+        space_summary_a, space_summary_b, tpm_limit,
+    )
     client = genai.Client(api_key=api_key)
 
-    accumulated = []
-    try:
-        stream = client.models.generate_content_stream(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type='application/json',
-                temperature=0.0,  # 매핑 작업은 결정론적일수록 좋음 (재현성)
-            ),
-        )
-        for chunk in stream:
-            piece = getattr(chunk, 'text', None)
-            if piece:
-                accumulated.append(piece)
+    last_error = None
+    for attempt in range(max_retries + 1):
+        _throttle_for_rpm(max_rpm=rpm_limit)  # 호출 직전에 RPM 여유 확보(필요시 대기)
+        accumulated = []
+        try:
+            stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    temperature=0.0,  # 매핑 작업은 결정론적일수록 좋음 (재현성)
+                ),
+            )
+            for chunk in stream:
+                piece = getattr(chunk, 'text', None)
+                if piece:
+                    accumulated.append(piece)
+                    if on_chunk is not None:
+                        on_chunk(''.join(accumulated))
+
+            full_text = ''.join(accumulated)
+            if not full_text:
+                raise LlmStoreyMatchError("Gemini 응답이 비어 있습니다.")
+            matches = _parse_response_text(full_text)
+            return _finalize_matches(matches, storeys_b)
+
+        except LlmStoreyMatchError:
+            raise  # 파싱 실패 등 자체 예외는 재시도해도 소용없으므로 그대로 전달
+        except Exception as e:
+            msg = str(e)
+            is_quota_error = ('429' in msg) or ('RESOURCE_EXHAUSTED' in msg) or ('quota' in msg.lower())
+            # RPD(일일) 초과로 보이는 단서(문구에 day/daily 등)가 있으면 재시도해도 무의미
+            looks_daily = is_quota_error and any(k in msg.lower() for k in ('daily', 'per day', 'rpd'))
+            if is_quota_error and not looks_daily and attempt < max_retries:
                 if on_chunk is not None:
-                    on_chunk(''.join(accumulated))
-    except Exception as e:
-        raise LlmStoreyMatchError(f"Gemini API 호출 실패: {e}") from e
+                    on_chunk(f"[일시적 요청 한도(RPM/TPM) 초과, {attempt + 1}/{max_retries}회 재시도 대기 중...]")
+                time.sleep(5 * (attempt + 1))  # 지수적으로 늘려가며 대기
+                last_error = e
+                continue
+            if looks_daily:
+                raise LlmStoreyMatchError(
+                    "일일 요청 한도(RPD)를 초과한 것으로 보입니다. 이 한도는 API 키/프로젝트 "
+                    "단위로 걸리며 이 앱이 강제로 막을 수 없습니다 - 태평양시간 자정에 초기화될 "
+                    "때까지 기다리거나, https://aistudio.google.com/rate-limit 에서 실제 한도를 "
+                    f"확인하세요. (원본 오류: {msg})"
+                ) from e
+            if is_quota_error:
+                raise LlmStoreyMatchError(
+                    f"요청 한도(RPM/TPM) 초과로 재시도했지만 실패했습니다. 잠시 후 다시 "
+                    f"시도해주세요. (원본 오류: {msg})"
+                ) from e
+            raise LlmStoreyMatchError(f"Gemini API 호출 실패: {e}") from e
 
-    full_text = ''.join(accumulated)
-    if not full_text:
-        raise LlmStoreyMatchError("Gemini 응답이 비어 있습니다.")
-
-    matches = _parse_response_text(full_text)
-    return _finalize_matches(matches, storeys_b)
+    raise LlmStoreyMatchError(f"Gemini API 호출이 반복적으로 실패했습니다: {last_error}")

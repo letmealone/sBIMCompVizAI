@@ -459,6 +459,12 @@ with st.sidebar:
         )
         run_llm_floor_map = st.button('🚀 AI 층 매핑 실행 (API 1회 호출)', width='stretch')
         st.caption('⚠️ 이 버튼을 누를 때만 API가 호출됩니다. 체크박스만 켜는 것으로는 호출되지 않습니다.')
+        st.caption(
+            f'🛡️ RPM(분당 {lsm.DEFAULT_RPM_LIMIT}회)은 이 앱이 자체적으로 대기시켜 방지하고, '
+            f'TPM(분당 {lsm.DEFAULT_TPM_LIMIT:,}토큰)은 요청이 크면 자동으로 축소합니다. '
+            'RPD(일일 한도)는 API 키/프로젝트 단위라 이 앱이 강제로 막을 수 없으니, '
+            '불필요한 반복 실행은 피해주세요 (같은 파일쌍은 이미 세션 내 캐싱되어 재실행해도 재호출되지 않습니다).'
+        )
     else:
         google_api_key = None
         llm_model_name = None
