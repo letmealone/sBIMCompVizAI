@@ -265,21 +265,47 @@ def _polygon_xy_lists(poly):
 # 3. 층별 요소 수집
 # ===================================================================
 
-def get_elements_for_storey(storey_entity, classes=None):
+def get_elements_for_storey(storey_entity, classes=None, max_decompose_depth=3):
     """해당 층에 속한 요소 목록.
     storey_entity: load_ifc()가 반환한 storeys 리스트의 원소(dict, 'entity' 키에 실제 IfcBuildingStorey).
     구조부재(벽/기둥 등)는 IfcRelContainedInSpatialStructure(ContainsElements)로,
-    IfcSpace는 대개 IfcRelAggregates(IsDecomposedBy)로 층에 연결되므로 둘 다 확인한다."""
+    IfcSpace는 대개 IfcRelAggregates(IsDecomposedBy)로 층에 연결되므로 둘 다 확인한다.
+
+    재귀적 하위분해요소 탐색(중요, 실측으로 확인된 버그 수정): 층에 직접 연결된 게 아니라
+    '층에 연결된 조립체(예: IfcStair)의 하위부품(예: 계단참/Landing 슬래브)'으로만 연결된
+    요소는 기존 방식(층의 ContainsElements/IsDecomposedBy 한 단계만 확인)으로는 찾지 못했다
+    (실측: 슬래브 172개 중 12개가 IfcStair 하위의 Landing이라 층별 조회에서 누락됨).
+    그래서 층에서 찾은 요소 각각에 대해, 그 요소 자신의 IsDecomposedBy(하위부품)까지
+    max_decompose_depth 단계 재귀적으로 따라가며 함께 수집한다."""
     storey_ifc = storey_entity['entity'] if isinstance(storey_entity, dict) else storey_entity
     elements = []
+    seen_guids = set()
+
+    def _add(el):
+        if el.GlobalId in seen_guids:
+            return
+        seen_guids.add(el.GlobalId)
+        if classes is None or el.is_a() in classes:
+            elements.append(el)
+
+    def _collect_children(el, depth):
+        if depth >= max_decompose_depth:
+            return
+        for rel in (getattr(el, 'IsDecomposedBy', None) or []):
+            for child in rel.RelatedObjects:
+                _add(child)
+                _collect_children(child, depth + 1)
+
+    top_level = []
     for rel in (storey_ifc.ContainsElements or []):
-        for el in rel.RelatedElements:
-            if classes is None or el.is_a() in classes:
-                elements.append(el)
+        top_level.extend(rel.RelatedElements)
     for rel in (storey_ifc.IsDecomposedBy or []):
-        for el in rel.RelatedObjects:
-            if classes is None or el.is_a() in classes:
-                elements.append(el)
+        top_level.extend(rel.RelatedObjects)
+
+    for el in top_level:
+        _add(el)
+        _collect_children(el, 0)
+
     return elements
 
 
