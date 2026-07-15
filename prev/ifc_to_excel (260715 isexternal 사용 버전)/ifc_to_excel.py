@@ -624,12 +624,7 @@ def _wall_distinct_space_count(ifc_file):
 def _determine_wall_classification(ifc_file):
     """벽 GlobalId -> ('내벽'/'외벽'/'외벽(추정)'/'내벽(추정-관계기반)'/'판정불가', 판정근거) 딕셔너리.
     1차: Pset_WallCommon.IsExternal.
-        ** 2026-07 기준 비활성화(주석처리) ** - 불완전하게 export된 IFC에서도 이 속성
-        자체는 존재하지만 실제 값(True/False)이 사실과 다르게 채워지는 경우가 확인되어,
-        이 값을 신뢰할 수 없다고 판단해 1차 판정을 건너뛰도록 했다. 코드는 나중에 다시
-        쓸 수 있도록 삭제하지 않고 주석처리만 해둔다 - 재활성화하려면 아래
-        "# is_ext = _wall_pset_is_external(w)"와 그 아래 두 if/elif 블록의 주석을 해제하면 된다.
-    2차(1차 없을 때만 - 지금은 항상): RelSpaceBoundary.ConnectionGeometry 기반 양면 Space 접촉 확인.
+    2차(1차 없을 때만): RelSpaceBoundary.ConnectionGeometry 기반 양면 Space 접촉 확인.
     3차(1차/2차 모두 근거 없을 때만, 예: ConnectionGeometry 자체가 파일에 없는 경우):
         지오메트리 없이 RelSpaceBoundary '관계'만으로 서로 다른 Space에 2개 이상 연결되는지
         확인. 2차보다 근거가 약해 '추정-관계기반'으로 명확히 구분 표시한다."""
@@ -638,9 +633,7 @@ def _determine_wall_classification(ifc_file):
     result = {}
     for w in ifc_file.by_type('IfcWall'):
         gid = w.GlobalId
-        # 1차(Pset_WallCommon.IsExternal) 판정 비활성화 - 위 docstring 참고.
-        # is_ext = _wall_pset_is_external(w)
-        is_ext = None
+        is_ext = _wall_pset_is_external(w)
         if is_ext is True:
             result[gid] = ('외벽', '1차: Pset_WallCommon.IsExternal=True')
         elif is_ext is False:
@@ -750,12 +743,7 @@ def _determine_element_classification(ifc_file, target_classes=ELEMENT_CLASSIFIC
     """_determine_wall_classification의 일반화 버전 - 벽 뿐 아니라 target_classes에 속하는
     모든 구조부재에 대해 동일한 3단계 로직(Pset -> 양면Space접촉 -> 관계개수)으로 내/외부를
     판정한다. 반환: {GlobalId: (라벨, 판정근거)}, 라벨은 '내부'/'외부'/'외부(추정)'/
-    '내부(추정-관계기반)'/'판정불가' (벽 전용 함수의 '내벽'/'외벽' 문구 대신 중립 표기).
-
-    1차(Pset_*Common.IsExternal) 판정은 ** 2026-07 기준 비활성화(주석처리) ** - 벽과 동일한
-    이유(_determine_wall_classification 참고: 불완전한 IFC에서도 속성은 존재하지만 값 자체를
-    신뢰할 수 없음)로 건너뛴다. 재활성화하려면 아래 "# is_ext = _element_pset_is_external(ent)"와
-    그 아래 두 if/elif 블록의 주석을 해제하면 된다."""
+    '내부(추정-관계기반)'/'판정불가' (벽 전용 함수의 '내벽'/'외벽' 문구 대신 중립 표기)."""
     both_sides = _element_both_sides_space_check(ifc_file, target_classes)
     distinct_count = _element_distinct_space_count(ifc_file, target_classes)
 
@@ -765,9 +753,7 @@ def _determine_element_classification(ifc_file, target_classes=ELEMENT_CLASSIFIC
             gid = ent.GlobalId
             if gid in result:
                 continue  # IfcWall/IfcWallStandardCase 등 상위-하위 클래스 중복 조회 방지
-            # 1차(Pset_*Common.IsExternal) 판정 비활성화 - 위 docstring 참고.
-            # is_ext = _element_pset_is_external(ent)
-            is_ext = None
+            is_ext = _element_pset_is_external(ent)
             if is_ext is True:
                 result[gid] = ('외부', '1차: Pset_*Common.IsExternal=True')
             elif is_ext is False:
