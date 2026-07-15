@@ -380,29 +380,6 @@ _AREA_KEY_RE = re.compile(r'area', re.IGNORECASE)
 _RATIO_KEY_RE = re.compile(r'ratio', re.IGNORECASE)
 
 
-def _get_qto_area(flat_props):
-    """flat_props에서 '정식 Qto_*BaseQuantities' 면적류 속성만 찾는다(Pset_ 커스텀 속성은
-    제외 - 그건 _get_pset_area_fallback이 최후 폴백으로 따로 처리한다).
-    BIM 저작툴이 직접 계산해 내보낸 값이므로 우리 자체 지오메트리 계산(footprint/시스템
-    bounding 등)보다 신뢰도가 높다고 보고 최우선으로 사용한다.
-    우선순위: Gross > Net > 기타(단순 Area 등)."""
-    candidates = []
-    for key, val in flat_props.items():
-        if not isinstance(val, (int, float)):
-            continue
-        if not key.startswith('Qto_'):
-            continue
-        if not _AREA_KEY_RE.search(key) or _RATIO_KEY_RE.search(key):
-            continue
-        score = 0 if 'Gross' in key else (1 if 'Net' in key else 2)
-        candidates.append((score, key, val))
-    if not candidates:
-        return None, None
-    candidates.sort(key=lambda c: c[0])
-    _, key, val = candidates[0]
-    return val, key
-
-
 def _get_pset_area_fallback(flat_props):
     """flat_props({'Pset.속성': 값, ...})에서 면적류 속성을 찾아 (값, 출처키) 반환.
     'Ratio'가 포함된 속성(예: Reinforcement_Area_Ratio)은 면적이 아니라 제외.
@@ -422,111 +399,10 @@ def _get_pset_area_fallback(flat_props):
     return val, key
 
 
-SYSTEM_ASSEMBLY_CLASSES = {'IfcDoor', 'IfcWindow', 'IfcCurtainWall'}
-# 문/창/커튼월은 실무에서 "부품(멀리언/프레임/패널/하드웨어) 개별 면적"이 아니라
-# "그 시스템 전체의 대표 면적(개구부/입면 면적)"에 관심이 있다는 요구사항에 따른 클래스 목록.
-# 이런 부재는 흔히 프레임/하드웨어 디테일이 섞인 상세 메쉬로 모델링되어, 메쉬 전체
-# 표면적을 합산하는 _get_footprint_area()가 실제 면적보다 훨씬 큰 값을 준다(실측:
-# 문 하나가 15㎡로 나온 사례 - 프레임/패널 등 여러 면이 겹쳐 합산됨).
-
-
-def _get_system_bounding_face_area(ent):
-    """문/창/커튼월처럼 하위부품으로 구성된 '시스템' 부재의 전체 대표 면적을 계산한다.
-    부품 개별 면적이 아니라 전체 bounding 치수(_get_local_dimensions, 이미 실측 검증된
-    안정적 함수) 중 가장 큰 두 축(=폭 x 높이)을 곱하고, 가장 작은 축(=두께)은 제외한다.
-    반환: (면적, 산출방식) 또는 계산 불가시 (None, None). 단위는 원본단위^2 그대로."""
-    x, y, z, src = _get_local_dimensions(ent)
-    dims = [d for d in (x, y, z) if d is not None]
-    if len(dims) < 2:
-        return None, None
-    dims.sort(reverse=True)
-    area = dims[0] * dims[1]
-    return area, f'시스템 전체 bounding치수 기반(폭x높이, 두께제외; {src})'
-
-
-def _get_decomposed_children(ent, _depth=0, _max_depth=3):
-    """IsDecomposedBy(IfcRelAggregates)로 연결된 하위부품들을 재귀적으로 수집.
-    _max_depth로 무한재귀/과도한 깊이를 방지(일반적으로 커튼월->멀리언/패널 1단계면 충분)."""
-    if _depth >= _max_depth:
-        return []
-    children = []
-    for rel in (getattr(ent, 'IsDecomposedBy', None) or []):
-        for child in rel.RelatedObjects:
-            children.append(child)
-            children.extend(_get_decomposed_children(child, _depth + 1, _max_depth))
-    return children
-
-
-def _get_assembly_bounding_face_area(ent):
-    """IfcCurtainWall처럼 부재 자신은 직접 지오메트리(Representation)가 없고, 하위부품
-    (멀리언=IfcMember/패널=IfcPlate 등, IsDecomposedBy)에만 지오메트리가 있는 '조립체
-    컨테이너'의 전체 대표 면적을 계산한다(실측으로 이런 구조를 확인함: 커튼월 자체는
-    Representation이 없고 자식으로 IfcMember/IfcPlate만 있음).
-    각 하위부품의 로컬 bounding 치수 + 월드 배치행렬로 bounding box 8개 모서리를 월드좌표로
-    변환해 전부 모으고, 전체를 감싸는 bounding box에서 가장 큰 두 축(폭x높이, 두께 제외)을
-    면적으로 쓴다. ifcopenshell.geom의 지오메트리 커널(삼각분할)은 쓰지 않고 배치행렬만
-    사용해 가볍다 - 다만 부재 로컬원점이 bounding box 코너와 정확히 일치한다는 보장은 없어
-    "전체 시스템이 대략 이 정도 규모"라는 근사치임을 산출방식 문구에 명시한다.
-    반환: (면적, 산출방식) 또는 (None, None)."""
-    import ifcopenshell.util.placement as plc
-
-    children = _get_decomposed_children(ent)
-    if not children:
-        return None, None
-
-    all_corners = []
-    for child in children:
-        x, y, z, _src = _get_local_dimensions(child)
-        if x is None or y is None or z is None:
-            continue
-        if child.ObjectPlacement is None:
-            continue
-        try:
-            m = plc.get_local_placement(child.ObjectPlacement)
-        except Exception:
-            continue
-        for sx in (0, x):
-            for sy in (0, y):
-                for sz in (0, z):
-                    world_pt = m @ np.array([sx, sy, sz, 1.0])
-                    all_corners.append(world_pt[:3])
-
-    if len(all_corners) < 2:
-        return None, None
-    arr = np.array(all_corners)
-    extent = arr.max(axis=0) - arr.min(axis=0)
-    dims = sorted(extent, reverse=True)
-    area = float(dims[0] * dims[1])
-    return area, f'하위부품{len(children)}개 월드bounding 근사(폭x높이, 두께제외)'
-
-
 def _area_columns(ent, flat_props, length_unit_scale=0.001):
-    """엑셀 컬럼용 면적 dict. 우선순위(중요 - 사용자 요청에 따른 순서):
-    ⓪ Qto_*BaseQuantities 정식 수량값(_get_qto_area) - BIM 저작툴이 직접 계산해 낸
-       값이라 최우선으로 신뢰한다(우리 자체 계산보다 먼저 시도).
-    ① (⓪이 없을 때만) IfcDoor/IfcWindow/IfcCurtainWall(SYSTEM_ASSEMBLY_CLASSES)은 부품
-       단위 메쉬 합산 대신 전체 bounding 치수(_get_system_bounding_face_area, 부재
-       자신에 지오메트리가 있는 경우), 그것도 없으면 하위부품 전체를 감싸는 bounding
-       (_get_assembly_bounding_face_area, 커튼월처럼 멀리언/패널에만 지오메트리가
-       있는 경우)을 사용한다 - 부품 단위 메쉬 합산은 실제보다 훨씬 큰 값을 주는 경우가
-       실측으로 확인되었기 때문.
-    ② 그 외 클래스 및 ①에서 실패한 경우: 좌표 직접계산(footprint/메쉬).
-    ③ ①②모두 실패시: Qto가 아닌 Pset 커스텀 속성값 폴백(_get_pset_area_fallback).
-    length_unit_scale: 원본단위->m 변환 계수(①②는 좌표기반이라 적용, ⓪③은 Pset/Qto
-    값 자체가 이미 프로젝트 단위(보통 m²)로 저장되어 있어 그대로 사용, 추가 변환 없음)."""
-    area, source_key = _get_qto_area(flat_props)
-    if area is not None:
-        return {'면적(㎡)': round(area, 4), '면적산출방식': f'Qto값 사용({source_key})'}
-
-    area, method = None, None
-    if ent.is_a() in SYSTEM_ASSEMBLY_CLASSES:
-        area, method = _get_system_bounding_face_area(ent)
-        if area is None:
-            area, method = _get_assembly_bounding_face_area(ent)
-
-    if area is None:
-        area, method = _get_footprint_area(ent)
-
+    """엑셀 컬럼용 면적 dict. ①②(좌표 직접계산) 실패시 ③(Pset값) 폴백.
+    length_unit_scale: 길이 변환 계수(원본단위->m, 보통 mm->m는 0.001) -> 면적은 제곱해서 적용."""
+    area, method = _get_footprint_area(ent)
     if area is None:
         area, source_key = _get_pset_area_fallback(flat_props)
         if area is not None:
@@ -541,8 +417,7 @@ def _area_columns(ent, flat_props, length_unit_scale=0.001):
     }
 
 
-AREA_TARGET_CLASSES = {'IfcRoof', 'IfcCovering', 'IfcSlab', 'IfcDoor', 'IfcWindow', 'IfcCurtainWall'}
-
+AREA_TARGET_CLASSES = {'IfcRoof', 'IfcCovering', 'IfcSlab'}
 
 
 # ===================================================================
@@ -650,125 +525,6 @@ def _determine_wall_classification(ifc_file):
                            f'연결됨(지오메트리 미확인 - 같은 면이 여러 방과 연속 접한 경우일 수도 있어 추정치임)')
         else:
             result[gid] = ('판정불가', '1차/2차/3차 모두 근거 데이터 없음')
-    return result
-
-
-# ===================================================================
-# 3-1c. 벽 외 모든 구조부재 대상 범용 내/외부 판정 (위 벽 전용 로직의 일반화 버전)
-#   기존 _determine_wall_classification()은 하위호환을 위해 그대로 두고(라벨이 '내벽'/
-#   '외벽'으로 벽 전용 문구), 여기서는 클래스에 무관하게 동작하며 라벨도 '내부'/'외부'로
-#   중립적으로 표기한다. Pset_WallCommon 대신 "이름이 Common으로 끝나는 모든 Pset의
-#   IsExternal"을 봐서 클래스별 Pset 이름(Pset_SlabCommon, Pset_DoorCommon 등)을
-#   일일이 나열하지 않아도 되게 했다.
-# ===================================================================
-
-ELEMENT_CLASSIFICATION_TARGET_CLASSES = (
-    'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcRoof', 'IfcCovering',
-    'IfcColumn', 'IfcBeam', 'IfcMember', 'IfcCurtainWall', 'IfcDoor', 'IfcWindow',
-    'IfcRailing', 'IfcStair', 'IfcStairFlight', 'IfcRamp', 'IfcRampFlight',
-)
-
-
-def _element_pset_is_external(ent):
-    """<임의Pset이름>Common.IsExternal 값을 bool로 반환 (클래스 무관 범용).
-    _wall_pset_is_external(Pset_WallCommon 고정)의 일반화 버전."""
-    try:
-        psets = E.get_psets(ent, psets_only=True)
-    except Exception:
-        return None
-    for pset_name, props in psets.items():
-        if pset_name.endswith('Common'):
-            val = props.get('IsExternal')
-            if isinstance(val, bool):
-                return val
-    return None
-
-
-def _element_both_sides_space_check(ifc_file, target_classes=None):
-    """_wall_both_sides_space_check의 일반화 버전: RelatedBuildingElement의 클래스가
-    target_classes(None이면 전체)에 속하는 모든 부재에 대해 양면 Space 접촉을 확인."""
-    import ifcopenshell.util.placement as plc
-
-    normals = {}
-    for r in ifc_file.by_type('IfcRelSpaceBoundary'):
-        elem = r.RelatedBuildingElement
-        if elem is None:
-            continue
-        if target_classes is not None and elem.is_a() not in target_classes:
-            continue
-        space = r.RelatingSpace
-        cg = r.ConnectionGeometry
-        if space is None or cg is None:
-            continue
-        surf = cg.SurfaceOnRelatingElement
-        if surf is None or not surf.is_a('IfcCurveBoundedPlane'):
-            continue
-        plane = surf.BasisSurface
-        try:
-            space_m = plc.get_local_placement(space.ObjectPlacement)
-            plane_m = plc.get_axis2placement(plane.Position)
-        except Exception:
-            continue
-        world_m = space_m @ plane_m
-        normal = world_m[:3, 2]
-        nrm = np.linalg.norm(normal)
-        if nrm == 0:
-            continue
-        normals.setdefault(elem.GlobalId, []).append(normal / nrm)
-
-    result = {}
-    for gid, ns in normals.items():
-        ref = ns[0]
-        has_same = any(np.dot(n, ref) > 0.5 for n in ns)
-        has_opp = any(np.dot(n, ref) < -0.5 for n in ns)
-        result[gid] = has_same and has_opp
-    return result
-
-
-def _element_distinct_space_count(ifc_file, target_classes=None):
-    """_wall_distinct_space_count의 일반화 버전. 알려진 한계(같은 면이 여러 방과 연속
-    접하는 경우와 진짜 양쪽분리를 완전히 구분 못함)는 벽과 동일하게 적용된다."""
-    counts = defaultdict(set)
-    for r in ifc_file.by_type('IfcRelSpaceBoundary'):
-        elem = r.RelatedBuildingElement
-        if elem is None or r.RelatingSpace is None:
-            continue
-        if target_classes is not None and elem.is_a() not in target_classes:
-            continue
-        counts[elem.GlobalId].add(r.RelatingSpace.GlobalId)
-    return {gid: len(spaces) for gid, spaces in counts.items()}
-
-
-def _determine_element_classification(ifc_file, target_classes=ELEMENT_CLASSIFICATION_TARGET_CLASSES):
-    """_determine_wall_classification의 일반화 버전 - 벽 뿐 아니라 target_classes에 속하는
-    모든 구조부재에 대해 동일한 3단계 로직(Pset -> 양면Space접촉 -> 관계개수)으로 내/외부를
-    판정한다. 반환: {GlobalId: (라벨, 판정근거)}, 라벨은 '내부'/'외부'/'외부(추정)'/
-    '내부(추정-관계기반)'/'판정불가' (벽 전용 함수의 '내벽'/'외벽' 문구 대신 중립 표기)."""
-    both_sides = _element_both_sides_space_check(ifc_file, target_classes)
-    distinct_count = _element_distinct_space_count(ifc_file, target_classes)
-
-    result = {}
-    for cls in target_classes:
-        for ent in ifc_file.by_type(cls):
-            gid = ent.GlobalId
-            if gid in result:
-                continue  # IfcWall/IfcWallStandardCase 등 상위-하위 클래스 중복 조회 방지
-            is_ext = _element_pset_is_external(ent)
-            if is_ext is True:
-                result[gid] = ('외부', '1차: Pset_*Common.IsExternal=True')
-            elif is_ext is False:
-                result[gid] = ('내부', '1차: Pset_*Common.IsExternal=False')
-            elif gid in both_sides:
-                if both_sides[gid]:
-                    result[gid] = ('내부', '2차: RelSpaceBoundary 양면 Space 접촉 확인')
-                else:
-                    result[gid] = ('외부(추정)', '2차: 한쪽 면만 Space 접촉 → 외부로 추정')
-            elif distinct_count.get(gid, 0) >= 2:
-                n = distinct_count[gid]
-                result[gid] = ('내부(추정-관계기반)',
-                               f'3차: ConnectionGeometry 없음, 서로 다른 Space {n}개와 연결(추정치)')
-            else:
-                result[gid] = ('판정불가', '1차/2차/3차 모두 근거 데이터 없음')
     return result
 
 
