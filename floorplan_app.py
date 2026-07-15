@@ -299,12 +299,22 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
                 f"**전체표시(폴백) {fallback_n}개**"
             )
 
-    fig = fc.build_plan_figure(
-        plan, selected_guid=selected_guid,
-        highlight_map=highlight_map, equipment_entities=equipment_entities,
-        pair_labels=pair_labels, wall_segments=wall_segments,
-        active_categories=active_categories,
-    )
+    try:
+        fig = fc.build_plan_figure(
+            plan, selected_guid=selected_guid,
+            highlight_map=highlight_map, equipment_entities=equipment_entities,
+            pair_labels=pair_labels, wall_segments=wall_segments,
+            active_categories=active_categories,
+        )
+    except TypeError:
+        # floorplan_core.py가 구버전이라 active_categories 파라미터 자체가 없는 경우
+        # (배포시 floorplan_app.py만 최신이고 floorplan_core.py는 예전 버전인 상황) -
+        # 크래시 대신 그 파라미터 없이 재시도해 범례 필터만 비활성화된 채로 동작하게 한다.
+        fig = fc.build_plan_figure(
+            plan, selected_guid=selected_guid,
+            highlight_map=highlight_map, equipment_entities=equipment_entities,
+            pair_labels=pair_labels, wall_segments=wall_segments,
+        )
     event = st.plotly_chart(
         fig, key=f'{session_prefix}_plot', on_select='rerun',
         selection_mode=('points',), use_container_width=True,
