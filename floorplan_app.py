@@ -31,6 +31,23 @@ import comparison_export as cmpexp
 st.set_page_config(layout='wide', page_title='IFC 평면도 비교')
 st.title('IFC 평면도 비교 (전문가 vs AI)')
 
+# 평면도(Plotly)에서 클릭으로 선택 가능한 지점(공간 내부 격자 마커) 위에 마우스를 올리면
+# 커서가 손가락 모양(pointer)으로 바뀌도록 CSS를 주입한다 - 기본적으로 Plotly의 markers
+# trace는 selectable 상태에서 보통 자체적으로 pointer 커서를 적용하지만, 브라우저/버전에
+# 따라 적용이 안 되는 경우가 있어 명시적으로 강제한다. 격자 마커는 opacity=0(안 보임)이라
+# 실제로 눈에 보이는 반응은 없지만, 마우스가 그 지점 위에 있을 때 커서만 바뀐다.
+st.markdown(
+    """
+    <style>
+    .js-plotly-plot .scatterlayer .trace .points path,
+    .js-plotly-plot .scatterlayer .trace .points circle {
+        cursor: pointer !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 MIN_STREAMLIT_VERSION = (1, 35)
 
 def _check_streamlit_version():
@@ -220,6 +237,7 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
     selected_guid = st.session_state.get(selected_key)
 
     dropdown_key = f'{session_prefix}_space_dropdown'
+    dropdown_sync_key = f'{session_prefix}_dropdown_sync_pending'
     space_options = [''] + [s['guid'] for s in plan['spaces']]
     guid_to_name = {s['guid']: s['name'] for s in plan['spaces']}
     guid_to_area = {s['guid']: s['polygon'].area for s in plan['spaces']}
@@ -230,7 +248,13 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
         prefix = f"[{pair_labels[guid]}번] " if pair_labels and guid in pair_labels else ''
         return f"{prefix}{guid_to_name.get(guid, '?')} ({guid_to_area.get(guid, 0):.1f}㎡)"
 
-    if st.session_state.get(dropdown_key) != (selected_guid or ''):
+    # 주의(버그 수정 이력): 예전엔 이 동기화를 매 실행마다 무조건 했었는데, 그러면 사용자가
+    # 드롭다운에서 방금 고른 값을 위젯이 화면에 렌더링하기도 전에 selected_guid(아직 갱신
+    # 되기 전의 이전 값)로 덮어써버려 "드롭다운이 반응 안 하는" 것처럼 보이는 버그가 있었다.
+    # 그래서 지금은 '우리가 selected_guid를 직접 바꾸고 st.rerun()을 요청한 바로 다음 실행'
+    # 에서만(dropdown_sync_key로 표시) 강제 동기화하고, 그 외의 일반 실행(=드롭다운 자체를
+    # 막 조작한 경우 포함)에서는 위젯이 사용자의 선택을 그대로 유지하게 둔다.
+    if st.session_state.pop(dropdown_sync_key, False):
         st.session_state[dropdown_key] = selected_guid or ''
 
     dropdown_guid = st.selectbox(
@@ -625,6 +649,8 @@ if file_a and file_b:
         st.session_state.pop('right_selected_guid', None)
         st.session_state.pop('left_space_dropdown', None)
         st.session_state.pop('right_space_dropdown', None)
+        st.session_state.pop('left_dropdown_sync_pending', None)
+        st.session_state.pop('right_dropdown_sync_pending', None)
         st.session_state['_last_storey_pair'] = _cur_key
 
     st.markdown(f"### 비교 중: 전문가 `{selected_a_name}` ↔ AI `{selected_b_name}`")
@@ -669,14 +695,18 @@ if file_a and file_b:
     changed = False
     if new_left:
         st.session_state['left_selected_guid'] = new_left
+        st.session_state['left_dropdown_sync_pending'] = True
         changed = True
         if auto_map_enabled and new_left in space_a_to_b:
             st.session_state['right_selected_guid'] = space_a_to_b[new_left]
+            st.session_state['right_dropdown_sync_pending'] = True
     if new_right:
         st.session_state['right_selected_guid'] = new_right
+        st.session_state['right_dropdown_sync_pending'] = True
         changed = True
         if auto_map_enabled and new_right in space_b_to_a:
             st.session_state['left_selected_guid'] = space_b_to_a[new_right]
+            st.session_state['left_dropdown_sync_pending'] = True
     if changed:
         st.rerun()  # 하이라이트/자동매핑 반영을 위해 갱신된 session_state로 즉시 재실행
 
