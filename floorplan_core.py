@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 import numpy as np
 import ifcopenshell
 import ifcopenshell.geom as geom
-from shapely.geometry import Polygon, Point, box
+from shapely.geometry import Polygon, Point, box, MultiPolygon
 from shapely.ops import unary_union
 
 import ifc_to_excel as ite  # 내외벽 판정(_determine_wall_classification), 면적계산(_area_columns) 등 재사용
@@ -621,14 +621,38 @@ def _relspaceboundary_precise_areas(ifc_file, member_entity, own_side_area_m2, t
 
 
 def _apportioned_area(ifc_file, member_entity, target_space_entity, own_side_area_m2, space_footprint,
-                       tol_factor=1.10):
-    """공간 하나에 귀속되는 부재 면적을 계산한다 (1차 정밀, 실패시 2차 근사로 자동 폴백).
+                       tol_factor=1.10, segment_polygon=None, wall_footprint_polygon=None):
+    """공간 하나에 귀속되는 부재 면적을 계산한다 (1차 정밀검증 -> 2차 화면표시와 동일한
+    클리핑(벽 전용) -> 3차 근사로 자동 폴백).
+
+    중요(가시화-엑셀 일치 보장): 벽(IfcWall/IfcWallStandardCase)의 경우, 평면도 화면에
+    표시하는 '이 공간에 실제 접한 구간' 클리핑(get_space_wall_segment_polygon, 1차
+    ConnectionGeometry 또는 2차 edge겹침 추정)과 정확히 같은 결과를 면적 산정에도
+    그대로 사용한다 - 화면의 하이라이트 영역과 엑셀 면적 숫자가 서로 다른 정밀도를
+    쓰는 불일치가 없도록 하기 위함. Slab/Roof/Covering 등 벽이 아닌 클래스는 이
+    클리핑 방식(벽의 길이축 개념 전제)이 적용되지 않으므로 기존처럼 1차/3차만 쓴다.
+
+    segment_polygon: 호출부가 이미 get_space_wall_segment_polygon()을 호출해 결과를
+        갖고 있다면(예: build_space_detail이 화면표시용으로 이미 계산해둔 경우) 여기로
+        넘겨 중복 계산을 피한다. None이면 이 함수가 필요시(벽인 경우만) 직접 계산한다.
+    wall_footprint_polygon: segment_polygon이 None이고 이 함수가 직접 계산해야 할 때
+        쓸 벽의 전체 footprint(넘기지 않으면 get_footprint_polygon(member_entity)로 자체 계산).
+
     1차: RelSpaceBoundary 정밀 계산 - 정합성 검증까지 통과하면 이 값을 그대로 쓴다.
-    2차(정밀 계산 데이터 없음/정합성 실패시): 기존 footprint 버퍼 근사.
+    2차(벽만 해당, 1차 실패시): 화면표시와 동일한 클리핑 결과의 면적.
+    3차(그 외 클래스, 또는 벽인데 2차도 실패시): 기존 footprint 버퍼 근사.
     반환: (면적, 산출방식 라벨) - 라벨은 진단/투명성 목적으로 호출부가 필요시 노출 가능."""
     precise = _relspaceboundary_precise_areas(ifc_file, member_entity, own_side_area_m2, tol_factor)
     if precise is not None and target_space_entity.GlobalId in precise:
         return precise[target_space_entity.GlobalId], '정밀(RelSpaceBoundary)'
+
+    if member_entity.is_a('IfcWall'):
+        if segment_polygon is None:
+            wfp = wall_footprint_polygon if wall_footprint_polygon is not None else get_footprint_polygon(member_entity)
+            seg_result = get_space_wall_segment_polygon(ifc_file, member_entity, target_space_entity, wfp)
+            segment_polygon = seg_result[0] if seg_result is not None else None
+        if segment_polygon is not None:
+            return segment_polygon.area, '정밀(화면표시와 동일 클리핑)'
 
     fraction = _space_portion_fraction(member_entity, space_footprint)
     if fraction is None:
@@ -809,18 +833,33 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
 
     if wall_footprint_polygon is None or wall_footprint_polygon.is_empty:
         return None
-    if wall_footprint_polygon.geom_type == 'MultiPolygon':
-        # 벽 footprint가 여러 조각으로 분리된 경우(드묾) 가장 큰 조각만 클리핑 대상으로 삼는다.
-        wall_footprint_polygon = max(wall_footprint_polygon.geoms, key=lambda g: g.area)
-    if wall_footprint_polygon.geom_type != 'Polygon':
+
+    # 벽 footprint를 로컬좌표(mm)로 변환. MultiPolygon(여러 조각으로 분리된 벽 - 개구부
+    # 등으로 흔함)이면 '가장 큰 조각만' 쓰지 않고 전체 조각을 보존한다 - 실측 결과, 이
+    # 공간과 실제로 겹치는 조각이 가장 큰 조각이 아닌 경우가 있어(예: 벽 전체는 여러
+    # 공간에 걸쳐 크게 나 있고, 이 공간에 닿은 부분은 작은 곁가지 조각인 경우) 가장 큰
+    # 조각만 남기면 정작 필요한 조각이 잘려나가 클리핑 결과가 빈 도형이 되는 버그가 있었다.
+    def _ring_to_local(coords):
+        return [tuple(member_m_inv @ np.array([x * 1000.0, y * 1000.0, 0.0, 1.0]))[:2] for (x, y) in coords]
+
+    if wall_footprint_polygon.geom_type == 'Polygon':
+        frag_polys = [wall_footprint_polygon]
+    elif wall_footprint_polygon.geom_type == 'MultiPolygon':
+        frag_polys = list(wall_footprint_polygon.geoms)
+    else:
         return None
-    coords_local = []
-    for (wx, wy) in wall_footprint_polygon.exterior.coords:
-        local_pt = member_m_inv @ np.array([wx * 1000.0, wy * 1000.0, 0.0, 1.0])
-        coords_local.append((local_pt[0], local_pt[1]))
-    local_poly = Polygon(coords_local)
-    if not local_poly.is_valid or local_poly.is_empty:
+
+    local_frags = []
+    for fp in frag_polys:
+        try:
+            lp = Polygon(_ring_to_local(fp.exterior.coords))
+        except Exception:
+            continue
+        if lp.is_valid and not lp.is_empty:
+            local_frags.append(lp)
+    if not local_frags:
         return None
+    local_poly = local_frags[0] if len(local_frags) == 1 else MultiPolygon(local_frags)
 
     minx, miny, maxx, maxy = local_poly.bounds
     clip_box = box(x_min, miny - margin, x_max, maxy + margin)
@@ -832,16 +871,28 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
         world_pt = member_m @ np.array([pt[0], pt[1], 0.0, 1.0])
         return (world_pt[0] / 1000.0, world_pt[1] / 1000.0)
 
+    # 클리핑 결과가 여러 조각(MultiPolygon)일 수 있다 - 전부 보존해 월드좌표로 되돌린다
+    # (build_plan_figure가 호출하는 _polygon_xy_lists가 이미 MultiPolygon 렌더링을 지원함).
     if clipped_local.geom_type == 'Polygon':
-        target = clipped_local
+        clipped_frags = [clipped_local]
     elif clipped_local.geom_type == 'MultiPolygon':
-        target = max(clipped_local.geoms, key=lambda g: g.area)
+        clipped_frags = list(clipped_local.geoms)
+    elif clipped_local.geom_type == 'GeometryCollection':
+        clipped_frags = [g for g in clipped_local.geoms if g.geom_type == 'Polygon']
     else:
         return None
-    world_coords = [_to_world_xy(p) for p in target.exterior.coords]
-    result = Polygon(world_coords)
-    if not (result.is_valid and not result.is_empty):
+    if not clipped_frags:
         return None
+
+    world_polys = []
+    for frag in clipped_frags:
+        world_coords = [_to_world_xy(p) for p in frag.exterior.coords]
+        wp = Polygon(world_coords)
+        if wp.is_valid and not wp.is_empty:
+            world_polys.append(wp)
+    if not world_polys:
+        return None
+    result = world_polys[0] if len(world_polys) == 1 else MultiPolygon(world_polys)
     return result, method
 
 
@@ -899,7 +950,9 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         flat = ite._flatten_psets(e)
         v = flat.get('Qto_WallBaseQuantities.Gross_Side_Area')
         if isinstance(v, (int, float)):
-            area_val, method = _apportioned_area(ifc_file, e, space_entity, v, space_footprint)
+            area_val, method = _apportioned_area(
+                ifc_file, e, space_entity, v, space_footprint,
+                segment_polygon=wall_segment_polygons.get(e.GlobalId))
             if method == '실패-전체값사용(과다산정 가능)':
                 wall_area_apportioned = False
             wall_simple_area[simple] += area_val
