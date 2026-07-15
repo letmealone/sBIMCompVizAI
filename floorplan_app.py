@@ -235,12 +235,15 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
         wall_segments = detail.get('wall_segment_polygons')
         equipment_entities = fc.get_space_contained_equipment(data['ifc_file'], sp_entry['entity'])
 
-        stats = detail.get('wall_segment_stats')
-        if stats and (stats['precise_cg'] + stats['precise_edge'] + stats['fallback']) > 0:
+        stats = detail.get('wall_segment_stats') or {}
+        precise_cg = stats.get('precise_cg', 0)
+        precise_edge = stats.get('precise_edge', 0)
+        fallback_n = stats.get('fallback', 0)
+        if precise_cg + precise_edge + fallback_n > 0:
             st.caption(
-                f"🧱 이 공간에 접한 벽 표시 방식: **정밀(경계좌표) {stats['precise_cg']}개** / "
-                f"**정밀(edge겹침 추정) {stats['precise_edge']}개** / "
-                f"**전체표시(폴백) {stats['fallback']}개**"
+                f"🧱 이 공간에 접한 벽 표시 방식: **정밀(경계좌표) {precise_cg}개** / "
+                f"**정밀(edge겹침 추정) {precise_edge}개** / "
+                f"**전체표시(폴백) {fallback_n}개**"
             )
 
     fig = fc.build_plan_figure(
