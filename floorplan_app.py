@@ -78,6 +78,25 @@ def _load_ifc_cached(file_bytes, filename, file_hash):
         return _session_cache(f'ifc_{file_hash}', _compute)
 
 
+def _precompute_storey_geometry_cached(data, file_hash, label):
+    """층별 구조부재 footprint(공간-부재 지오메트리 보강탐지에 쓰임)를 파일 업로드 직후
+    한 번만 미리 계산해둔다. _session_cache로 '이번 세션에 이미 실행했는지'만 체크하고,
+    실제 계산 결과는 fc.precompute_storey_geometry()가 채우는 모듈 전역 캐시
+    (floorplan_core._storey_candidate_footprint_cache)에 저장된다 - 이후 공간을 클릭할
+    때마다 그 층을 처음 조회하며 발생하던 지연이 없어지고 캐시만 즉시 불러오게 된다."""
+    def _compute():
+        progress = st.progress(0.0, text=f'{label}: 층별 부재 지오메트리 사전계산 중...')
+        total = len(data['storeys'])
+
+        def _cb(storey_name, i, total_n):
+            progress.progress(i / total_n, text=f'{label}: {storey_name} 사전계산 중 ({i}/{total_n})')
+
+        fc.precompute_storey_geometry(data['ifc_file'], data['storeys'], status_cb=_cb)
+        progress.empty()
+        return True
+    return _session_cache(f'storey_geom_precomputed_{file_hash}', _compute)
+
+
 def _build_plan_cached(storeys, storey_name, cache_tag, wall_classification=None):
     def _compute():
         storey = next(s for s in storeys if s['Name'] == storey_name)
@@ -374,6 +393,9 @@ if file_a and file_b:
 
     data_a = _load_ifc_cached(file_a.getvalue(), file_a.name, file_hash_a)
     data_b = _load_ifc_cached(file_b.getvalue(), file_b.name, file_hash_b)
+
+    _precompute_storey_geometry_cached(data_a, file_hash_a, '전문가 IFC')
+    _precompute_storey_geometry_cached(data_b, file_hash_b, 'AI IFC')
 
     floor_mapping, floor_offset = fc.match_storeys(data_a['storeys'], data_b['storeys'])
 

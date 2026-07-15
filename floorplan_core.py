@@ -365,18 +365,81 @@ def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None):
 EQUIPMENT_CLASSES = ('IfcLightFixture', 'IfcSensor', 'IfcFireSuppressionTerminal', 'IfcAlarm')
 
 
-def get_space_related_elements(ifc_file, space_entity):
+def _find_space_storey(space_entity):
+    """공간이 속한 층(IfcBuildingStorey) 엔티티를 찾는다 (Decomposes 관계 순회 -
+    공간은 보통 IfcRelAggregates를 통해 자신이 속한 IfcBuildingStorey를 가리킨다)."""
+    for rel in (space_entity.Decomposes or []):
+        obj = getattr(rel, 'RelatingObject', None)
+        if obj is not None and obj.is_a('IfcBuildingStorey'):
+            return obj
+    return None
+
+
+_storey_candidate_footprint_cache = {}  # (id(ifc_file), 층GlobalId) -> [(element, footprint), ...]
+
+
+def _get_storey_candidate_footprints(ifc_file, storey):
+    """해당 층에 속한 구조부재들의 footprint를 한 번만 계산해 캐싱한다(층 하나당 1회 -
+    같은 층의 여러 공간이 이 캐시를 공유해 반복 계산을 피한다). 지오메트리 기반 보강
+    탐지(get_space_related_elements)에서 사용."""
+    key = (id(ifc_file), storey.GlobalId)
+    if key not in _storey_candidate_footprint_cache:
+        candidates = get_elements_for_storey(storey, classes=set(ite.ELEMENT_CLASSIFICATION_TARGET_CLASSES))
+        pairs = []
+        for el in candidates:
+            fp = get_footprint_polygon(el)
+            if fp is not None and not fp.is_empty:
+                pairs.append((el, fp))
+        _storey_candidate_footprint_cache[key] = pairs
+    return _storey_candidate_footprint_cache[key]
+
+
+def precompute_storey_geometry(ifc_file, storeys, status_cb=None):
+    """모든 층의 구조부재 footprint를 미리 계산해 캐싱한다(_get_storey_candidate_footprints).
+    파일 업로드 직후 한 번 호출해두면, 이후 공간을 클릭할 때마다 그 층을 처음 조회하며
+    발생하던 지연(지오메트리 계산)이 없어지고 캐시만 즉시 불러오게 된다.
+    status_cb(선택): 진행상황을 알릴 콜백, status_cb(현재층이름, 완료수, 전체수)로 호출.
+    이미 계산된 층은 _get_storey_candidate_footprints가 캐시를 즉시 반환하므로, 이 함수를
+    여러 번 호출해도(예: 세션 재시작 없이 재호출) 안전하다(중복 계산 없음)."""
+    total = len(storeys)
+    for i, storey in enumerate(storeys, start=1):
+        if status_cb:
+            status_cb(storey['Name'], i, total)
+        _get_storey_candidate_footprints(ifc_file, storey['entity'])
+
+
+def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, adjacency_tol=0.15):
     """해당 Space와 RelSpaceBoundary로 연결된 부재 목록 (벽/기둥/문/창/바닥 등 경계형성 요소).
     GlobalId 기준으로 중복 제거한다: 같은 부재(예: 기둥 하나)가 하나의 Space와 여러 개의
     별도 경계면(RelSpaceBoundary 레코드)으로 연결되는 경우가 실제로 있음을 확인했다
     (예: 샘플 파일 Space-S-01에 접한 기둥은 물리적으로 7개인데, RelSpaceBoundary 레코드는
     23건 - 기둥 하나당 여러 면이 각각 별도 레코드로 잡힘). 개수 집계는 물리적 개체 수
-    기준이어야 하므로 여기서 dedup한다."""
+    기준이어야 하므로 여기서 dedup한다.
+
+    geometric_fallback=True(기본값)이면, 관계(RelSpaceBoundary) 자체가 누락되어 못 찾은
+    부재도 보완해서 찾는다: 실측으로 확인된 실제 사례처럼, 두 공간이 공유하는 벽인데
+    IFC 내보내기 과정에서 한쪽 공간과의 RelSpaceBoundary만 기록되고 반대쪽은 누락되는
+    경우가 있다. 이런 경우 관계만으로는 절대 찾을 수 없으므로, 같은 층의 부재들 중
+    이 공간의 footprint와 실제로 맞닿아 있는(거리 adjacency_tol 이내) 것도 추가로
+    포함시킨다. 층별 후보 부재 footprint는 캐싱되어(_get_storey_candidate_footprints)
+    같은 층의 여러 공간이 반복 계산 없이 공유한다."""
     by_guid = {}
     for rel in ifc_file.by_type('IfcRelSpaceBoundary'):
         if rel.RelatingSpace == space_entity and rel.RelatedBuildingElement is not None:
             el = rel.RelatedBuildingElement
             by_guid[el.GlobalId] = el
+
+    if geometric_fallback:
+        storey = _find_space_storey(space_entity)
+        if storey is not None:
+            space_fp = get_footprint_polygon(space_entity)
+            if space_fp is not None and not space_fp.is_empty:
+                for el, el_fp in _get_storey_candidate_footprints(ifc_file, storey):
+                    if el.GlobalId in by_guid:
+                        continue
+                    if space_fp.distance(el_fp) <= adjacency_tol:
+                        by_guid[el.GlobalId] = el
+
     return list(by_guid.values())
 
 
