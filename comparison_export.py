@@ -164,9 +164,7 @@ def _floor_class_summary(ifc_file, storey_dict):
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
             flat = ite._flatten_psets(e)
-            v = flat.get('Qto_WallBaseQuantities.Gross_Side_Area')
-            if isinstance(v, (int, float)):
-                area_val = v
+            area_val, _src = fc._get_wall_side_area_m2(e, flat_props=flat)
         elif cls in fc._STRUCTURAL_AREA_MEANINGFUL_CLASSES:
             flat = ite._flatten_psets(e)
             cols = ite._area_columns(e, flat)

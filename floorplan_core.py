@@ -999,6 +999,27 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
     return result, method
 
 
+def _get_wall_side_area_m2(ent, flat_props=None):
+    """벽의 '한쪽 면' 면적(Gross_Side_Area 상당, ㎡)을 구한다.
+    1차: Qto_WallBaseQuantities.Gross_Side_Area (BIM 저작툴 자동계산값, 최우선).
+    2차(1차가 없거나 빈 문자열 등 숫자가 아닐 때 - 실측으로 확인된 실제 사례: AI가
+        만든 IFC 중 이 값이 빈 문자열('')로 채워진 경우가 있어, 벽 개수는 세지지만
+        면적은 계산 자체가 시도되지 않고 NULL로 빠지는 문제가 있었다): 전체 bounding
+        치수 기반(폭x높이, 두께 제외) 근사 - 문/창/커튼월에 이미 쓰던
+        ite._get_system_bounding_face_area()를 재사용한다(원본단위(보통 mm) 제곱
+        값이라 1e-6을 곱해 ㎡로 환산).
+    반환: (면적㎡, 산출방식) 또는 둘 다 계산 불가시 (None, None)."""
+    if flat_props is None:
+        flat_props = ite._flatten_psets(ent)
+    v = flat_props.get('Qto_WallBaseQuantities.Gross_Side_Area')
+    if isinstance(v, (int, float)):
+        return v, 'Qto값 사용(Qto_WallBaseQuantities.Gross_Side_Area)'
+    raw_area, method = ite._get_system_bounding_face_area(ent)
+    if raw_area is not None:
+        return raw_area * 1e-6, f'폴백-{method}'
+    return None, None
+
+
 def build_space_detail(ifc_file, wall_classification, space_entity):
     """클릭된 Space 1개에 대한 요약 정보:
     - 접한 구조재 개수(전체) + 벽 내/외부 구분(좌우대칭 이진 + 상세근거 병기)
@@ -1051,8 +1072,8 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         wall_simple_counts[simple] += 1
         wall_detail_counts[detail_label] += 1
         flat = ite._flatten_psets(e)
-        v = flat.get('Qto_WallBaseQuantities.Gross_Side_Area')
-        if isinstance(v, (int, float)):
+        v, _src = _get_wall_side_area_m2(e, flat_props=flat)
+        if v is not None:
             area_val, method = _apportioned_area(
                 ifc_file, e, space_entity, v, space_footprint,
                 segment_polygon=wall_segment_polygons.get(e.GlobalId))
@@ -1161,8 +1182,8 @@ def build_space_structural_breakdown(ifc_file, element_classification, space_ent
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
             flat = ite._flatten_psets(e)
-            v = flat.get('Qto_WallBaseQuantities.Gross_Side_Area')
-            if isinstance(v, (int, float)):
+            v, _src = _get_wall_side_area_m2(e, flat_props=flat)
+            if v is not None:
                 area_val, _method = _apportioned_area(ifc_file, e, space_entity, v, space_footprint)
         elif cls in _STRUCTURAL_AREA_MEANINGFUL_CLASSES:
             flat = ite._flatten_psets(e)
