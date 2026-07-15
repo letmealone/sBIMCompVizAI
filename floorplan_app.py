@@ -299,11 +299,15 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
                 f"**정밀(edge겹침 추정) {precise_edge}개** / "
                 f"**전체표시(폴백) {fallback_n}개**"
             )
-    elif floor_category and hasattr(fc, 'build_floor_category_highlight'):
-        # 범례 버튼으로 진입한 '층 전체 카테고리 강조' 모드: 특정 공간과 무관하게
-        # 이 층의 모든 부재/설비를 분류해, 클릭된 카테고리만 active_categories로 강조한다.
-        highlight_map, equipment_entities = fc.build_floor_category_highlight(
-            data['ifc_file'], plan, data['wall_classification'])
+    elif floor_category:
+        if hasattr(fc, 'build_floor_category_highlight'):
+            highlight_map, equipment_entities = fc.build_floor_category_highlight(
+                data['ifc_file'], plan, data['wall_classification'])
+        else:
+            st.warning(
+                '⚠️ 범례 버튼 기능을 쓰려면 floorplan_core.py가 최신본이어야 합니다 '
+                '(build_floor_category_highlight 함수가 없는 구버전이 배포되어 있습니다).'
+            )
 
     active_categories_for_plot = {floor_category} if (floor_category and highlight_map is not None
                                                        and detail is None) else None
