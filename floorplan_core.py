@@ -760,6 +760,14 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         wall_segment_polygons[e.GlobalId] = get_space_wall_segment_polygon(
             ifc_file, e, space_entity, wall_footprint)
 
+    # 진단용: 이 공간에 접한 벽 중 몇 개가 정밀표시(ConnectionGeometry 기반 클리핑)되고
+    # 몇 개가 폴백(벽 전체 표시)됐는지 - 화면만 봐서는 구분이 안 되므로 앱에서 캡션으로
+    # 보여줄 수 있게 여기서 집계해둔다.
+    wall_segment_stats = {
+        'precise': sum(1 for v in wall_segment_polygons.values() if v is not None),
+        'fallback': sum(1 for v in wall_segment_polygons.values() if v is None),
+    }
+
     class_counts = Counter(e.is_a() for e in related)
 
     # 벽 내/외부 구분 (좌우 대칭 이진) + 상세 판정(원래 4분류) 병기
@@ -846,6 +854,7 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         # 평면도 하이라이트용: 각 관련 부재 GlobalId -> 표시 카테고리
         'highlight_map': _build_highlight_map(related, equipment, wall_classification),
         'wall_segment_polygons': wall_segment_polygons,
+        'wall_segment_stats': wall_segment_stats,
     }
 
 

@@ -235,6 +235,13 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
         wall_segments = detail.get('wall_segment_polygons')
         equipment_entities = fc.get_space_contained_equipment(data['ifc_file'], sp_entry['entity'])
 
+        stats = detail.get('wall_segment_stats')
+        if stats and (stats['precise'] + stats['fallback']) > 0:
+            st.caption(
+                f"🧱 이 공간에 접한 벽 표시 방식: **정밀(실제 접한 구간만) {stats['precise']}개** / "
+                f"**전체표시(폴백, ConnectionGeometry 없음) {stats['fallback']}개**"
+            )
+
     fig = fc.build_plan_figure(
         plan, selected_guid=selected_guid,
         highlight_map=highlight_map, equipment_entities=equipment_entities,
