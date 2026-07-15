@@ -639,7 +639,9 @@ def _apportioned_area(ifc_file, member_entity, target_space_entity, own_side_are
         쓸 벽의 전체 footprint(넘기지 않으면 get_footprint_polygon(member_entity)로 자체 계산).
 
     1차: RelSpaceBoundary 정밀 계산 - 정합성 검증까지 통과하면 이 값을 그대로 쓴다.
-    2차(벽만 해당, 1차 실패시): 화면표시와 동일한 클리핑 결과의 면적.
+    2차(벽만 해당, 1차 실패시): 화면표시와 동일한 클리핑에서 얻은 '길이 비율'을
+        own_side_area_m2(실제 벽 side area)에 곱한 값 - 클리핑 폴리곤 자체의 면적을
+        그대로 쓰지 않는다(평면투영 footprint 면적과 실제 벽면적은 물리량이 다름).
     3차(그 외 클래스, 또는 벽인데 2차도 실패시): 기존 footprint 버퍼 근사.
     반환: (면적, 산출방식 라벨) - 라벨은 진단/투명성 목적으로 호출부가 필요시 노출 가능."""
     precise = _relspaceboundary_precise_areas(ifc_file, member_entity, own_side_area_m2, tol_factor)
@@ -647,12 +649,19 @@ def _apportioned_area(ifc_file, member_entity, target_space_entity, own_side_are
         return precise[target_space_entity.GlobalId], '정밀(RelSpaceBoundary)'
 
     if member_entity.is_a('IfcWall'):
+        wfp = wall_footprint_polygon if wall_footprint_polygon is not None else get_footprint_polygon(member_entity)
         if segment_polygon is None:
-            wfp = wall_footprint_polygon if wall_footprint_polygon is not None else get_footprint_polygon(member_entity)
             seg_result = get_space_wall_segment_polygon(ifc_file, member_entity, target_space_entity, wfp)
             segment_polygon = seg_result[0] if seg_result is not None else None
-        if segment_polygon is not None:
-            return segment_polygon.area, '정밀(화면표시와 동일 클리핑)'
+        if segment_polygon is not None and wfp is not None and wfp.area > 0:
+            # 중요(단위 버그 수정): segment_polygon은 평면투영 footprint(길이x두께) 기준
+            # 클리핑 결과라, 그 면적을 그대로 쓰면 실제 벽면적(Gross_Side_Area=길이x높이)과
+            # 물리량 자체가 달라 훨씬 작은 값이 나온다(실측: 벽 하나에서 9배 이상 차이).
+            # 그래서 "클리핑된 부분이 벽 전체 footprint에서 차지하는 길이 비율"만 뽑아,
+            # 그 비율을 own_side_area_m2(실제 벽면적)에 곱한다 - 두께는 벽 전체에서
+            # 일정하다고 보므로 footprint 면적비 = 길이비가 된다.
+            fraction = segment_polygon.area / wfp.area
+            return own_side_area_m2 * fraction, '정밀(화면표시와 동일 클리핑)'
 
     fraction = _space_portion_fraction(member_entity, space_footprint)
     if fraction is None:
