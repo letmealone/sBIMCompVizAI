@@ -656,20 +656,95 @@ def _space_portion_fraction(member_entity, space_footprint, buffer_dist=_APPORTI
     return min(inter.area / member_footprint.area, 1.0)
 
 
+def _polygon_edges(poly):
+    """폴리곤 외곽선을 (시작점,끝점) 변(edge) 리스트로 반환."""
+    coords = list(poly.exterior.coords)
+    return [(coords[i], coords[i + 1]) for i in range(len(coords) - 1)]
+
+
+def _collinear_overlap_segment(seg1, seg2, line_tol=0.02, min_overlap=0.05):
+    """두 선분이 (근사적으로) 같은 직선 위에 있고 겹치는 구간이 있으면 그 구간의 두
+    끝점을 반환한다. 평행하지 않거나, 평행해도 다른 직선(오프셋)이거나, 겹치는 길이가
+    min_overlap(m) 미만이면 None.
+    line_tol(m): 직선 일치 판정 허용오차. 실측(같은 파일 벽/공간 좌표) 기준으로는 완전히
+    일치했으나, 부동소수점 오차나 미세한 모델링 오차를 감안한 여유."""
+    (x1, y1), (x2, y2) = seg1
+    (x3, y3), (x4, y4) = seg2
+    d1 = np.array([x2 - x1, y2 - y1])
+    len1 = np.linalg.norm(d1)
+    if len1 < 1e-6:
+        return None
+    d1n = d1 / len1
+
+    d3 = np.array([x4 - x3, y4 - y3])
+    len3 = np.linalg.norm(d3)
+    if len3 < 1e-6:
+        return None
+    d3n = d3 / len3
+
+    if abs(d1n[0] * d3n[1] - d1n[1] * d3n[0]) > 0.02:  # 평행 여부(허용오차)
+        return None
+
+    v = np.array([x3 - x1, y3 - y1])
+    if abs(v[0] * d1n[1] - v[1] * d1n[0]) > line_tol:  # 평행하지만 다른 직선(오프셋 있음)
+        return None
+
+    t3_start = np.dot(np.array([x3 - x1, y3 - y1]), d1n)
+    t3_end = np.dot(np.array([x4 - x1, y4 - y1]), d1n)
+    t_min = max(0.0, min(t3_start, t3_end))
+    t_max = min(len1, max(t3_start, t3_end))
+    if t_max - t_min < min_overlap:
+        return None
+
+    p_start = np.array([x1, y1]) + d1n * t_min
+    p_end = np.array([x1, y1]) + d1n * t_max
+    return (tuple(p_start), tuple(p_end))
+
+
+def _space_wall_edge_overlap_local_x_range(wall_footprint, space_footprint, member_m_inv):
+    """ConnectionGeometry가 없을 때의 대안(2차 방법): 벽과 공간 폴리곤을 2D 면적으로
+    겹치면(intersection) 실측상 거의 항상 0㎡가 나온다(공간은 보통 벽 안쪽 면까지 딱
+    맞춰 모델링되어 서로 침범하지 않고 '변(edge)'만 공유하기 때문 - 실측으로 확인됨).
+    그래서 면적 교집합 대신, 두 폴리곤의 '변'끼리 같은 직선 위에서 겹치는 구간을 직접
+    찾아 그 구간을 벽의 로컬좌표계 X범위로 변환해 반환한다.
+    반환: (x_min, x_max) 또는 겹치는 변이 없으면 None."""
+    wall_edges = _polygon_edges(wall_footprint)
+    space_edges = _polygon_edges(space_footprint)
+
+    local_xs = []
+    for we in wall_edges:
+        for se in space_edges:
+            overlap = _collinear_overlap_segment(we, se)
+            if overlap is None:
+                continue
+            for (wx, wy) in overlap:
+                local_pt = member_m_inv @ np.array([wx * 1000.0, wy * 1000.0, 0.0, 1.0])
+                local_xs.append(local_pt[0])
+
+    if not local_xs:
+        return None
+    return min(local_xs), max(local_xs)
+
+
 def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_footprint_polygon):
     """평면도 표시용: 벽 전체가 아니라 '선택된 공간에 실제로 접한 부분만' 잘라낸 폴리곤을
-    반환한다. RelSpaceBoundary.ConnectionGeometry(경계면 폴리곤)를 이용해, 그 경계가
-    벽의 길이방향 축 기준 어느 구간([x_min,x_max])에 해당하는지 구한 뒤, 벽의 전체
-    footprint를 그 구간만큼만 클리핑한다.
+    반환한다.
+
+    1차: RelSpaceBoundary.ConnectionGeometry(경계면 폴리곤)를 이용해, 그 경계가 벽의
+        길이방향 축 기준 어느 구간([x_min,x_max])에 해당하는지 구한다.
+    2차(1차 데이터 없을 때만): ConnectionGeometry가 없는 파일에서도, 벽과 공간의 자체
+        footprint 폴리곤의 '변(edge)'이 같은 직선 위에서 겹치는 구간을 직접 찾아 같은
+        방식으로 X범위를 구한다(_space_wall_edge_overlap_local_x_range) - 공간은 보통
+        벽 안쪽 면까지 딱 맞춰 모델링되어 있어 이 방법이 유효함을 실측으로 확인했다.
+    3차(둘 다 실패): None 반환 -> 호출부가 벽 전체 표시로 폴백.
 
     계산 절차(벽 자신의 로컬좌표계 기준 - _space_side_of_member와 같은 방식):
-      1. 이 벽-공간 쌍의 RelSpaceBoundary들에서 경계 폴리곤 점들을 월드좌표로 변환
-      2. 벽의 로컬좌표계로 재변환해 길이방향(X) 범위[x_min,x_max] 추출
-      3. 벽의 전체 footprint(월드,m)를 벽 로컬좌표(mm)로 옮겨 그 X범위로 클리핑
-      4. 다시 월드좌표(m)로 되돌려 반환
+      1. 위 1차 또는 2차 방법으로 벽 로컬좌표계 기준 길이방향(X) 범위[x_min,x_max] 추출
+      2. 벽의 전체 footprint(월드,m)를 벽 로컬좌표(mm)로 옮겨 그 X범위로 클리핑
+      3. 다시 월드좌표(m)로 되돌려 반환
 
-    반환: 클리핑된 Polygon, 또는 계산 불가시(ConnectionGeometry 없음 등) None
-    (호출부는 None이면 벽 전체 폴리곤을 그대로 표시하는 폴백을 쓰면 된다)."""
+    반환: (클리핑된 Polygon, 산출방법 문자열) 튜플, 또는 계산 불가시 None
+    (호출부는 None이면 벽 전체 폴리곤으로 표시하는 폴백을 쓰면 된다)."""
     import ifcopenshell.util.placement as plc
 
     try:
@@ -703,8 +778,20 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
             local_pt = member_m_inv @ np.array([world_pt[0], world_pt[1], world_pt[2], 1.0])
             local_xs.append(local_pt[0])
 
+    method = 'ConnectionGeometry' if local_xs else None
+
     if not local_xs:
-        return None  # ConnectionGeometry 데이터 없음 -> 호출부가 벽 전체로 폴백
+        # 2차: ConnectionGeometry 없음 -> 벽-공간 폴리곤의 변(edge) 겹침으로 대체 시도
+        space_footprint = get_footprint_polygon(space_entity)
+        if space_footprint is not None and wall_footprint_polygon is not None:
+            x_range = _space_wall_edge_overlap_local_x_range(
+                wall_footprint_polygon, space_footprint, member_m_inv)
+            if x_range is not None:
+                local_xs = list(x_range)
+                method = 'edge겹침추정'
+
+    if not local_xs:
+        return None  # 1차/2차 모두 실패 -> 호출부가 벽 전체로 폴백
 
     margin = 50.0  # mm, 경계에 딱 붙어 잘리는 것을 막기 위한 여유
     x_min, x_max = min(local_xs) - margin, max(local_xs) + margin
@@ -737,7 +824,9 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
         return None
     world_coords = [_to_world_xy(p) for p in target.exterior.coords]
     result = Polygon(world_coords)
-    return result if result.is_valid and not result.is_empty else None
+    if not (result.is_valid and not result.is_empty):
+        return None
+    return result, method
 
 
 def build_space_detail(ifc_file, wall_classification, space_entity):
@@ -752,19 +841,26 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
 
     # 평면도 표시용: 벽마다 '이 공간에 실제로 접한 부분만' 잘라낸 폴리곤(계산 가능한 것만).
     # None이면 호출부(build_plan_figure)가 벽 전체를 표시하는 것으로 폴백한다.
+    # get_space_wall_segment_polygon()은 (폴리곤, 산출방법) 튜플 또는 None을 반환하므로
+    # 여기서 폴리곤만 뽑아 wall_segment_polygons에, 산출방법은 wall_segment_methods에 저장.
     wall_segment_polygons = {}
+    wall_segment_methods = {}
     for e in related:
         if not e.is_a('IfcWall'):
             continue
         wall_footprint = get_footprint_polygon(e)
-        wall_segment_polygons[e.GlobalId] = get_space_wall_segment_polygon(
-            ifc_file, e, space_entity, wall_footprint)
+        result = get_space_wall_segment_polygon(ifc_file, e, space_entity, wall_footprint)
+        if result is not None:
+            wall_segment_polygons[e.GlobalId], wall_segment_methods[e.GlobalId] = result
+        else:
+            wall_segment_polygons[e.GlobalId] = None
 
-    # 진단용: 이 공간에 접한 벽 중 몇 개가 정밀표시(ConnectionGeometry 기반 클리핑)되고
-    # 몇 개가 폴백(벽 전체 표시)됐는지 - 화면만 봐서는 구분이 안 되므로 앱에서 캡션으로
-    # 보여줄 수 있게 여기서 집계해둔다.
+    # 진단용: 이 공간에 접한 벽 중 몇 개가 어떤 방식으로 표시됐는지(정밀-ConnectionGeometry
+    # 기반 / 정밀-edge겹침 추정 / 폴백-벽 전체표시) - 화면만 봐서는 구분이 안 되므로 앱에서
+    # 캡션으로 보여줄 수 있게 여기서 집계해둔다.
     wall_segment_stats = {
-        'precise': sum(1 for v in wall_segment_polygons.values() if v is not None),
+        'precise_cg': sum(1 for m in wall_segment_methods.values() if m == 'ConnectionGeometry'),
+        'precise_edge': sum(1 for m in wall_segment_methods.values() if m == 'edge겹침추정'),
         'fallback': sum(1 for v in wall_segment_polygons.values() if v is None),
     }
 

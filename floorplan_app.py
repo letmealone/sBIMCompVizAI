@@ -236,10 +236,11 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
         equipment_entities = fc.get_space_contained_equipment(data['ifc_file'], sp_entry['entity'])
 
         stats = detail.get('wall_segment_stats')
-        if stats and (stats['precise'] + stats['fallback']) > 0:
+        if stats and (stats['precise_cg'] + stats['precise_edge'] + stats['fallback']) > 0:
             st.caption(
-                f"🧱 이 공간에 접한 벽 표시 방식: **정밀(실제 접한 구간만) {stats['precise']}개** / "
-                f"**전체표시(폴백, ConnectionGeometry 없음) {stats['fallback']}개**"
+                f"🧱 이 공간에 접한 벽 표시 방식: **정밀(경계좌표) {stats['precise_cg']}개** / "
+                f"**정밀(edge겹침 추정) {stats['precise_edge']}개** / "
+                f"**전체표시(폴백) {stats['fallback']}개**"
             )
 
     fig = fc.build_plan_figure(
