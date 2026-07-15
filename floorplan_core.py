@@ -657,9 +657,20 @@ def _space_portion_fraction(member_entity, space_footprint, buffer_dist=_APPORTI
 
 
 def _polygon_edges(poly):
-    """폴리곤 외곽선을 (시작점,끝점) 변(edge) 리스트로 반환."""
-    coords = list(poly.exterior.coords)
-    return [(coords[i], coords[i + 1]) for i in range(len(coords) - 1)]
+    """폴리곤(또는 MultiPolygon) 외곽선을 (시작점,끝점) 변(edge) 리스트로 반환.
+    부재 footprint가 여러 조각(MultiPolygon)으로 분리되어 나오는 경우가 실제로 있어
+    (예: 개구부로 완전히 분리된 벽 등), 그 경우 모든 조각의 외곽선을 합쳐서 반환한다."""
+    if poly.geom_type == 'MultiPolygon':
+        polys = list(poly.geoms)
+    elif poly.geom_type == 'Polygon':
+        polys = [poly]
+    else:
+        return []  # Point/LineString 등 면적 없는 형태는 edge 겹침 계산 대상이 아님
+    edges = []
+    for p in polys:
+        coords = list(p.exterior.coords)
+        edges.extend((coords[i], coords[i + 1]) for i in range(len(coords) - 1))
+    return edges
 
 
 def _collinear_overlap_segment(seg1, seg2, line_tol=0.02, min_overlap=0.05):
@@ -797,6 +808,11 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
     x_min, x_max = min(local_xs) - margin, max(local_xs) + margin
 
     if wall_footprint_polygon is None or wall_footprint_polygon.is_empty:
+        return None
+    if wall_footprint_polygon.geom_type == 'MultiPolygon':
+        # 벽 footprint가 여러 조각으로 분리된 경우(드묾) 가장 큰 조각만 클리핑 대상으로 삼는다.
+        wall_footprint_polygon = max(wall_footprint_polygon.geoms, key=lambda g: g.area)
+    if wall_footprint_polygon.geom_type != 'Polygon':
         return None
     coords_local = []
     for (wx, wy) in wall_footprint_polygon.exterior.coords:
