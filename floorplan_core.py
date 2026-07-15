@@ -379,7 +379,7 @@ def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None):
             continue
         hover = get_element_hover_info(el, wall_classification=wall_classification)
         structural.append({'guid': el.GlobalId, 'class': el.is_a(), 'name': el.Name or '',
-                            'polygon': poly, 'hover': hover})
+                            'polygon': poly, 'hover': hover, 'entity': el})
 
     return {'spaces': spaces, 'structural': structural}
 
@@ -1375,6 +1375,30 @@ _PAIR_PALETTE_FAINT = [
     'rgba(227,119,194,0.12)', 'rgba(127,127,127,0.12)', 'rgba(188,189,34,0.12)',
     'rgba(23,190,207,0.12)',
 ]
+
+
+def build_floor_category_highlight(ifc_file, plan_data, wall_classification):
+    """선택된 공간과 무관하게, 이 층에 있는 '모든' 구조부재/설비를 카테고리별로 분류한
+    하이라이트맵과 설비 목록을 반환한다. 범례를 버튼처럼 눌러서 '이 층 전체에서 그
+    카테고리에 해당하는 것 전부'를 보여주기 위한 용도 - 기존 highlight_map(build_space_detail
+    반환값)은 특정 공간에 관련된 부재만 대상으로 했던 것과 다르다(공간 선택 없이도 동작).
+
+    반환: (highlight_map: {GlobalId: 카테고리}, equipment_entities: [엔티티, ...])
+    이 결과를 build_plan_figure(..., active_categories={클릭한 카테고리})와 함께 쓰면
+    그 카테고리만 강조되고 나머지는 배경처럼 옅게 표시된다(기존 active_categories
+    필터 메커니즘을 그대로 재사용)."""
+    structural_entities = [el['entity'] for el in plan_data['structural']]
+
+    equipment_entities = []
+    seen_eq = set()
+    for sp in plan_data['spaces']:
+        for e in get_space_contained_equipment(ifc_file, sp['entity']):
+            if e.GlobalId not in seen_eq:
+                seen_eq.add(e.GlobalId)
+                equipment_entities.append(e)
+
+    highlight_map = _build_highlight_map(structural_entities, equipment_entities, wall_classification)
+    return highlight_map, equipment_entities
 
 
 def get_legend_items():
