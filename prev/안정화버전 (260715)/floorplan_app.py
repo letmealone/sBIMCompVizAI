@@ -17,7 +17,6 @@ floorplan_app.py
 ifcopenshell, numpy, pandas, openpyxl (ifc_to_excel.py 의존성)
 """
 import os
-import re
 import tempfile
 import hashlib
 import zipfile
@@ -77,14 +76,6 @@ def _extract_customdata_guid(point):
 
 
 _SESSION_CACHE_PREFIX = '_cache__'
-
-def _safe_filename_stem(filename):
-    """업로드된 파일명에서 확장자를 떼고, 파일시스템/zip에 안전하지 않은 문자를 치환한다.
-    엑셀/zip 출력 파일명에 원본 IFC 파일명을 그대로 반영하기 위한 용도."""
-    stem = os.path.splitext(filename or '')[0]
-    stem = re.sub(r'[\\/:*?"<>|]', '_', stem).strip()
-    return stem or 'unnamed'
-
 
 def _session_cache(key, compute_fn):
     full_key = _SESSION_CACHE_PREFIX + key
@@ -229,8 +220,7 @@ def _render_floor_checkbox_tree(storeys, session_selected_key, key_prefix, badge
     return current
 
 
-def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, pair_labels=None,
-                                 active_categories=None):
+def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, pair_labels=None):
     st.subheader(label)
     if storey_name is None or plan is None:
         st.info('이 층에 대응하는 층을 찾지 못했습니다 (층 매핑 없음).')
@@ -303,7 +293,6 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
         plan, selected_guid=selected_guid,
         highlight_map=highlight_map, equipment_entities=equipment_entities,
         pair_labels=pair_labels, wall_segments=wall_segments,
-        active_categories=active_categories,
     )
     event = st.plotly_chart(
         fig, key=f'{session_prefix}_plot', on_select='rerun',
@@ -335,24 +324,13 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
     return detail, new_guid
 
 
-def _render_legend_filter():
-    """평면도 범례를 인터랙티브 필터로 렌더링한다. 벽 이외 부재/설비를 하나로 뭉뚱그리지
-    않고 개별 클래스별 항목으로 나열하며, 선택 해제한 항목은 양쪽 평면도 모두에서
-    옅게(배경처럼) 처리된다(기본은 전체 선택 = 기존과 동일하게 전부 강조 표시).
-    반환: 현재 활성화된 카테고리 집합(set)."""
-    items = fc.get_legend_items()
-    options = [key for key, _label, _color in items]
-    labels = {key: label for key, label, _color in items}
-
-    key = '_legend_active_categories'
-    if key not in st.session_state:
-        st.session_state[key] = options  # 최초 진입시 기본값: 전체 선택
-
-    selected = st.multiselect(
-        '🎨 범례 (선택된 항목만 평면도에서 강조 표시됩니다 · 기본은 전체 선택)',
-        options=options, format_func=lambda k: labels.get(k, k), key=key,
+def _render_legend():
+    st.caption(
+        '🟦 내부-확정(1차/2차) · 🟦(연함) 내부-추정(3차: 관계상 서로다른 Space 2개+ 연결, '
+        '지오메트리 미확인) · 🟧 외부-판정됨 · 🟥 외부-판정불가(근거 없어 편입) · '
+        '🟪 벽 이외 관련부재(기둥/문/창/바닥 등) · 🟨 설비(조명·센서·소방장치) · '
+        '⬜ 선택된 공간과 무관한 배경 요소'
     )
-    return set(selected)
 
 
 def _render_union_table(title, left_d, right_d, label_left, label_right,
@@ -620,22 +598,19 @@ if file_a and file_b:
                     else:
                         spaces_dict_b[name] = cmpexp._floor_space_polygons(s)
 
-                a_stem = _safe_filename_stem(file_a.name)
-                b_stem = _safe_filename_stem(file_b.name)
-
                 with st.spinner('전문가(A) IFC 전체 부재 엑셀 생성 중...'):
                     _tmp_a_path = tempfile.NamedTemporaryFile(suffix='.ifc', delete=False).name
                     with open(_tmp_a_path, 'wb') as fpa:
                         fpa.write(file_a.getvalue())
                     out_a = ite.extract_ifc_to_excel(
-                        _tmp_a_path, os.path.join(tempfile.gettempdir(), f'{a_stem}_추출_{file_hash_a}.xlsx'))
+                        _tmp_a_path, os.path.join(tempfile.gettempdir(), f'A_{file_hash_a}_추출.xlsx'))
 
                 with st.spinner('AI(B) IFC 전체 부재 엑셀 생성 중...'):
                     _tmp_b_path = tempfile.NamedTemporaryFile(suffix='.ifc', delete=False).name
                     with open(_tmp_b_path, 'wb') as fpb:
                         fpb.write(file_b.getvalue())
                     out_b = ite.extract_ifc_to_excel(
-                        _tmp_b_path, os.path.join(tempfile.gettempdir(), f'{b_stem}_추출_{file_hash_b}.xlsx'))
+                        _tmp_b_path, os.path.join(tempfile.gettempdir(), f'B_{file_hash_b}_추출.xlsx'))
 
                 wb_compare = cmpexp.build_comparison_workbook(
                     data_a, data_b, _badge_source,
@@ -644,20 +619,17 @@ if file_a and file_b:
                     area_thresh=export_area_thresh, centroid_thresh=export_centroid_thresh,
                     status_cb=_export_status_cb,
                 )
-                out_compare = os.path.join(
-                    tempfile.gettempdir(), f'{a_stem}_{b_stem}_비교결과_{file_hash_a}_{file_hash_b}.xlsx')
+                out_compare = os.path.join(tempfile.gettempdir(), f'비교결과_{file_hash_a}_{file_hash_b}.xlsx')
                 wb_compare.save(out_compare)
                 export_status.empty()
 
-                zip_filename = f'{a_stem}_{b_stem}_IFC비교.zip'
-                zip_path = os.path.join(tempfile.gettempdir(), f'{a_stem}_{b_stem}_{file_hash_a}_{file_hash_b}.zip')
+                zip_path = os.path.join(tempfile.gettempdir(), f'IFC비교_{file_hash_a}_{file_hash_b}.zip')
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(out_a, arcname=f'01_{a_stem}_추출.xlsx')
-                    zf.write(out_b, arcname=f'02_{b_stem}_추출.xlsx')
-                    zf.write(out_compare, arcname=f'03_{a_stem}_{b_stem}_비교결과.xlsx')
+                    zf.write(out_a, arcname='01_전문가IFC_추출.xlsx')
+                    zf.write(out_b, arcname='02_AI_IFC_추출.xlsx')
+                    zf.write(out_compare, arcname='03_층공간매칭_비교결과.xlsx')
                 with open(zip_path, 'rb') as fz:
                     st.session_state['_export_zip_bytes'] = fz.read()
-                st.session_state['_export_zip_filename'] = zip_filename
                 st.success('✅ 엑셀 생성 완료!')
             except Exception as e:
                 st.error(f'엑셀 생성 중 오류가 발생했습니다: {e}')
@@ -666,8 +638,7 @@ if file_a and file_b:
         if st.session_state.get('_export_zip_bytes'):
             st.download_button(
                 '⬇️ 비교 결과 zip 다운로드', data=st.session_state['_export_zip_bytes'],
-                file_name=st.session_state.get('_export_zip_filename', 'IFC_비교결과.zip'),
-                mime='application/zip', width='stretch',
+                file_name='IFC_비교결과.zip', mime='application/zip', width='stretch',
             )
         # ===================================================================
 
@@ -710,19 +681,16 @@ if file_a and file_b:
         else:
             st.warning('공간 자동 매핑: 매칭 후보를 찾지 못했습니다 (면적 임계값을 늘려보세요).')
 
-    active_categories = _render_legend_filter()
-
     col_left, col_right = st.columns(2)
     with col_left:
         detail_left, new_left = _render_plot_and_get_detail(
-            '전문가 IFC', data_a, selected_a_name, plan_a, 'left', pair_labels=pair_labels_a,
-            active_categories=active_categories)
+            '전문가 IFC', data_a, selected_a_name, plan_a, 'left', pair_labels=pair_labels_a)
     with col_right:
         detail_right, new_right = _render_plot_and_get_detail(
-            'AI IFC', data_b, selected_b_name, plan_b, 'right', pair_labels=pair_labels_b,
-            active_categories=active_categories)
+            'AI IFC', data_b, selected_b_name, plan_b, 'right', pair_labels=pair_labels_b)
 
-    # (범례는 위에서 _render_legend_filter()로 인터랙티브하게 이미 표시됨)
+    if detail_left is not None or detail_right is not None:
+        _render_legend()
 
     changed = False
     if new_left:

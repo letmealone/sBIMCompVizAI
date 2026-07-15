@@ -54,7 +54,6 @@ CATEGORY_LABELS = {
     'IfcStair': '계단(Stair)',
     'IfcStairFlight': '계단참(StairFlight)',
     'IfcRamp': '경사로(Ramp)',
-    'IfcRampFlight': '경사로참(RampFlight)',
     'IfcDoor': '문(Door)',
     'IfcWindow': '창(Window)',
     'IfcOpeningElement': '개구부(Opening)',
@@ -63,10 +62,6 @@ CATEGORY_LABELS = {
     'IfcFurnishingElement': '적재물(Furnishing)',
     'IfcFlowTerminal': '설비단말(FlowTerminal)',
     'IfcDistributionElement': '설비요소(Distribution)',
-    'IfcLightFixture': '조명(LightFixture)',
-    'IfcSensor': '센서(Sensor)',
-    'IfcFireSuppressionTerminal': '소방장치(FireSuppressionTerminal)',
-    'IfcAlarm': '경보기(Alarm)',
 }
 
 CORE_ATTRS = ['GlobalId', 'Name', 'Description', 'ObjectType', 'Tag', 'PredefinedType', 'LongName']

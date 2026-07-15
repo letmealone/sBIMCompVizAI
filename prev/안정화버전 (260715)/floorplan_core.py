@@ -1244,9 +1244,7 @@ def _build_highlight_map(related, equipment, wall_classification):
     카테고리: 'wall_internal'(내벽, 1차/2차 확정) / 'wall_internal_estimated'(내벽 추정-관계기반, 3차) /
               'wall_external_confirmed'(외벽, 1차/2차로 확정) /
               'wall_external_unknown'(판정불가로 외부 편입된 것 - 근거 없음, 구분 표시) /
-              그 외에는 부재의 IFC 클래스명 그대로(예: 'IfcColumn','IfcDoor') / 설비도 마찬가지로
-              클래스명 그대로(예: 'IfcLightFixture') - 예전엔 각각 'related'/'equipment' 하나로
-              뭉뚱그렸으나, 범례에서 개별 항목으로 클릭 필터링할 수 있도록 세분화했다."""
+              'related'(벽 이외 경계 관련 부재) / 'equipment'(조명/센서/소방설비)."""
     hl = {}
     for e in related:
         if e.is_a('IfcWall'):
@@ -1261,9 +1259,9 @@ def _build_highlight_map(related, equipment, wall_classification):
             else:
                 hl[e.GlobalId] = 'wall_external_confirmed'
         else:
-            hl[e.GlobalId] = e.is_a()
+            hl[e.GlobalId] = 'related'
     for e in equipment:
-        hl[e.GlobalId] = e.is_a()
+        hl[e.GlobalId] = 'equipment'
     return hl
 
 
@@ -1272,86 +1270,35 @@ def _build_highlight_map(related, equipment, wall_classification):
 # ===================================================================
 
 _STRUCT_COLORS = {
-    'IfcWall': 'rgba(90,90,90,0.35)',
-    'IfcWallStandardCase': 'rgba(90,90,90,0.35)',
-    'IfcColumn': 'rgba(40,40,40,0.35)',
-    'IfcBeam': 'rgba(120,90,60,0.3)',
-    'IfcSlab': 'rgba(200,190,170,0.2)',
-    'IfcCurtainWall': 'rgba(120,170,220,0.25)',
-    'IfcDoor': 'rgba(150,100,50,0.25)',
-    'IfcWindow': 'rgba(120,200,230,0.25)',
+    'IfcWall': 'rgba(90,90,90,0.85)',
+    'IfcWallStandardCase': 'rgba(90,90,90,0.85)',
+    'IfcColumn': 'rgba(40,40,40,0.9)',
+    'IfcBeam': 'rgba(120,90,60,0.7)',
+    'IfcSlab': 'rgba(200,190,170,0.4)',
+    'IfcCurtainWall': 'rgba(120,170,220,0.6)',
+    'IfcDoor': 'rgba(150,100,50,0.6)',
+    'IfcWindow': 'rgba(120,200,230,0.6)',
 }
-_FADED_COLOR = 'rgba(210,210,210,0.18)'
-_FADED_LINE = 'rgba(190,190,190,0.3)'
+_FADED_COLOR = 'rgba(210,210,210,0.35)'
+_FADED_LINE = 'rgba(190,190,190,0.5)'
 
-# 공간 클릭시 하이라이트 색상 (카테고리별로 뚜렷이 구분). 벽 4종은 고정, 그 외
-# IFC 클래스/설비 클래스는 아래 _CLASS_HIGHLIGHT_PALETTE에서 클래스명으로 직접 조회한다.
+# 공간 클릭시 하이라이트 색상 (카테고리별로 뚜렷이 구분)
 _HIGHLIGHT_COLORS = {
     'wall_internal': ('rgba(30,110,230,0.85)', 'rgba(15,70,160,1.0)'),              # 내벽(확정) = 진한 파랑
     'wall_internal_estimated': ('rgba(120,180,240,0.75)', 'rgba(60,120,190,1.0)'),  # 내벽(추정-관계기반) = 연한 파랑
     'wall_external_confirmed': ('rgba(230,90,30,0.85)', 'rgba(170,60,10,1.0)'),     # 외벽(판정됨) = 주황
     'wall_external_unknown': ('rgba(230,190,190,0.85)', 'rgba(160,50,50,1.0)'),     # 외벽(판정불가) = 연한 붉은/분홍(주황과 구분)
+    'related': ('rgba(160,50,190,0.75)', 'rgba(110,20,140,1.0)'),                   # 벽 이외 관련부재 = 보라
 }
+_EQUIPMENT_COLOR = 'rgba(220,190,20,0.95)'  # 설비(조명/센서/소방) = 노랑 마커
 
-# 벽 이외 구조부재 + 설비 각 클래스별 개별 하이라이트 색(범례에서 각각 따로 클릭 가능하게
-# 하기 위해 '관련부재'/'설비' 하나로 뭉뚱그리지 않고 클래스마다 뚜렷이 구분).
-_CLASS_HIGHLIGHT_PALETTE = {
-    'IfcColumn': ('rgba(120,60,170,0.85)', 'rgba(80,30,120,1.0)'),        # 기둥 = 보라
-    'IfcBeam': ('rgba(150,100,40,0.85)', 'rgba(100,60,10,1.0)'),          # 보 = 갈색
-    'IfcMember': ('rgba(150,100,40,0.7)', 'rgba(100,60,10,0.9)'),         # 기타부재 = 연한 갈색
-    'IfcSlab': ('rgba(190,150,80,0.85)', 'rgba(140,100,30,1.0)'),         # 바닥 = 황토
-    'IfcRoof': ('rgba(190,150,80,0.6)', 'rgba(140,100,30,0.8)'),          # 지붕 = 연한 황토
-    'IfcCovering': ('rgba(90,160,150,0.85)', 'rgba(40,110,100,1.0)'),     # 천장/외장 = 청록
-    'IfcCurtainWall': ('rgba(90,150,220,0.85)', 'rgba(40,100,180,1.0)'),  # 커튼월 = 하늘
-    'IfcDoor': ('rgba(190,110,60,0.85)', 'rgba(140,70,20,1.0)'),          # 문 = 주황갈색
-    'IfcWindow': ('rgba(110,200,230,0.85)', 'rgba(50,150,190,1.0)'),      # 창 = 시안
-    'IfcRailing': ('rgba(170,170,60,0.85)', 'rgba(120,120,20,1.0)'),      # 난간 = 올리브
-    'IfcStair': ('rgba(200,90,150,0.85)', 'rgba(150,40,100,1.0)'),        # 계단 = 자홍
-    'IfcStairFlight': ('rgba(200,90,150,0.7)', 'rgba(150,40,100,0.9)'),
-    'IfcRamp': ('rgba(200,90,150,0.6)', 'rgba(150,40,100,0.8)'),
-    'IfcRampFlight': ('rgba(200,90,150,0.5)', 'rgba(150,40,100,0.7)'),
-    # 설비(마커로 그려지지만 범례색 통일을 위해 fill 자리에 마커색을 넣어둠)
-    'IfcLightFixture': ('rgba(230,200,20,0.95)', 'rgba(150,130,0,1.0)'),
-    'IfcSensor': ('rgba(230,140,20,0.95)', 'rgba(150,90,0,1.0)'),
-    'IfcFireSuppressionTerminal': ('rgba(230,60,60,0.95)', 'rgba(150,20,20,1.0)'),
-    'IfcAlarm': ('rgba(180,20,180,0.95)', 'rgba(110,0,110,1.0)'),
-}
-
-
-def _get_highlight_color(cat):
-    """카테고리(벽 4종 또는 IFC 클래스명)에 대응하는 (fill, line) 색을 반환.
-    등록되지 않은 클래스는 이름 해시 기반으로 일관된 색을 생성해 항상 같은 클래스가
-    같은 색으로 보이게 한다(세션 간에도 동일)."""
-    if cat in _HIGHLIGHT_COLORS:
-        return _HIGHLIGHT_COLORS[cat]
-    if cat in _CLASS_HIGHLIGHT_PALETTE:
-        return _CLASS_HIGHLIGHT_PALETTE[cat]
-    h = abs(hash(cat)) % 360
-    return (f'hsla({h},65%,55%,0.85)', f'hsla({h},70%,35%,1.0)')
-
-
-def _category_label(cat):
-    """카테고리 키 -> 범례에 표시할 한글 라벨."""
-    _WALL_LABELS = {
-        'wall_internal': '내벽(확정)',
-        'wall_internal_estimated': '내벽(추정-관계기반)',
-        'wall_external_confirmed': '외벽(판정됨)',
-        'wall_external_unknown': '외벽(판정불가)',
-    }
-    if cat in _WALL_LABELS:
-        return _WALL_LABELS[cat]
-    return ite._label(cat)
-
-
-_EQUIPMENT_COLOR = 'rgba(220,190,20,0.95)'  # 설비 클래스가 팔레트에 없을 때의 폴백 마커색
-
-_SPACE_FILL = 'rgba(100,180,120,0.16)'
+_SPACE_FILL = 'rgba(100,180,120,0.35)'
 _SPACE_FILL_SELECTED = 'rgba(230,100,60,0.55)'
-_SPACE_LINE = 'rgba(60,140,80,0.5)'
+_SPACE_LINE = 'rgba(60,140,80,0.9)'
 _SPACE_LINE_SELECTED = 'rgba(200,60,20,1.0)'
 
-_SPACE_UNMATCHED_FILL = 'rgba(190,190,190,0.16)'
-_SPACE_UNMATCHED_LINE = 'rgba(150,150,150,0.4)'
+_SPACE_UNMATCHED_FILL = 'rgba(190,190,190,0.35)'
+_SPACE_UNMATCHED_LINE = 'rgba(150,150,150,0.8)'
 
 # 공간 자동매핑 쌍 표시용 색상 팔레트 (양쪽 평면도에서 같은 번호는 항상 같은 색)
 _PAIR_PALETTE = [
@@ -1377,24 +1324,6 @@ _PAIR_PALETTE_FAINT = [
 ]
 
 
-def get_legend_items():
-    """평면도 범례에 표시할 전체 카테고리 목록을 (카테고리키, 한글라벨, fill색상) 튜플
-    리스트로 반환한다. 특정 공간의 실제 관련부재가 아니라, 앱이 표시할 수 있는 모든
-    카테고리를 고정된 순서로 나열한 것 - 범례 필터 UI가 매번 같은 항목 구성을 갖도록.
-    순서: 벽 4종 -> 벽 이외 구조부재 각 클래스 -> 설비 각 클래스."""
-    wall_categories = ['wall_internal', 'wall_internal_estimated',
-                        'wall_external_confirmed', 'wall_external_unknown']
-    nonwall_classes = [c for c in ite.ELEMENT_CLASSIFICATION_TARGET_CLASSES
-                        if c not in ('IfcWall', 'IfcWallStandardCase')]
-    equipment_classes = list(EQUIPMENT_CLASSES)
-
-    items = []
-    for cat in wall_categories + nonwall_classes + equipment_classes:
-        fill, _line = _get_highlight_color(cat)
-        items.append((cat, _category_label(cat), fill))
-    return items
-
-
 def build_pair_labels(a_to_b):
     """match_spaces()가 반환한 a_to_b({A GlobalId: B GlobalId}) 딕셔너리로부터,
     양쪽 평면도에 표시할 번호 라벨을 한번에 생성한다 (같은 쌍은 항상 같은 번호).
@@ -1409,7 +1338,7 @@ def build_pair_labels(a_to_b):
 
 def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
                        highlight_map=None, equipment_entities=None, pair_labels=None,
-                       wall_segments=None, active_categories=None):
+                       wall_segments=None):
     """plan_data(build_storey_plan_data 반환값)로 Plotly Figure 생성.
 
     Space는 내부에 보이지 않는 마커 격자를 깔아 '폴리곤 내부 아무 곳이나 클릭'해도
@@ -1417,21 +1346,16 @@ def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
 
     selected_guid: 강조 표시할 선택된 Space의 GlobalId.
     highlight_map: build_space_detail()이 반환한 {GlobalId: 카테고리} 딕셔너리.
-        선택된 Space와 관련된 구조요소를 카테고리(벽 4종 또는 IFC 클래스명)별 색상으로
-        강조하고, 나머지 배경 구조요소는 흐리게(faded) 처리한다. None이면(선택 없음)
-        기본 클래스별 색상으로 표시.
-    active_categories: 범례에서 사용자가 선택한 '활성 카테고리' 집합(iterable) 또는 None.
-        None이면 관련된 모든 카테고리를 강조 표시(기존 동작). 주어지면, highlight_map상
-        관련 부재이더라도 이 집합에 없는 카테고리는 배경처럼 흐리게 처리한다 - 범례
-        항목을 클릭해 특정 카테고리만 골라 볼 수 있게 하기 위함.
+        선택된 Space와 관련된 구조요소를 카테고리별 색상으로 강조하고, 나머지 배경
+        구조요소는 흐리게(faded) 처리해 '내부 객체(파랑)/외부 객체(주황)/기타 관련부재(보라)'가
+        한눈에 구분되도록 한다. None이면(선택 없음) 기본 클래스별 색상으로 표시.
     wall_segments: build_space_detail()이 반환한 {벽 GlobalId: 클리핑된 Polygon|None}.
         벽을 강조할 때, 벽 전체가 아니라 '실제로 선택된 공간에 접한 부분만' 진하게
         칠하고, 벽의 나머지 부분(다른 공간에 접하거나 접하지 않는 부분)은 옅게(맥락용)
         표시한다 - 면적 계산(RelSpaceBoundary 기반 정밀 안분)과 화면 표시의 정밀도를
         맞추기 위함. 클리핑에 실패한 벽(None)은 기존처럼 벽 전체를 강조색으로 표시한다.
     equipment_entities: 선택된 Space '안에' 있는 설비(조명/센서/소방장치 등) ifcopenshell 엔티티
-        목록. 평면도에 클래스별 색상의 마커로 추가 표시한다 (RelSpaceBoundary 대상이 아니라
-        별도로 그림).
+        목록. 평면도에 노란 마커로 추가 표시한다 (RelSpaceBoundary 대상이 아니라 별도로 그림).
     pair_labels: build_pair_labels()가 반환한 {GlobalId: 번호} 딕셔너리(이 평면도 쪽).
         주어지면(자동매핑 활성화시) 매칭된 공간마다 같은 번호 배지+같은 계열 색상을 칠해
         양쪽 평면도에서 어떤 공간끼리 매칭됐는지 클릭 없이도 한눈에 보이게 한다.
@@ -1443,17 +1367,15 @@ def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
     highlight_map = highlight_map or {}
     pair_labels = pair_labels or {}
     wall_segments = wall_segments or {}
-    active_set = set(active_categories) if active_categories is not None else None
 
     # 구조요소(벽/기둥/보/바닥 등)
     for el in plan_data['structural']:
         cat = highlight_map.get(el['guid'])
         is_wall = el['class'] in ('IfcWall', 'IfcWallStandardCase')
         segment_poly = wall_segments.get(el['guid']) if is_wall else None
-        cat_active = cat is not None and (active_set is None or cat in active_set)
 
         if highlight_map:
-            if cat_active:
+            if cat in _HIGHLIGHT_COLORS:
                 if segment_poly is not None:
                     # 정밀 표시: 벽 전체는 맥락용으로 옅게, 실제 접한 구간만 진하게 덧그림
                     xs_full, ys_full = _polygon_xy_lists(el['polygon'])
@@ -1463,7 +1385,7 @@ def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
                         hoverinfo='text', text=el.get('hover') or f"{el['class']} {el['name']}".strip(),
                         showlegend=False,
                     ))
-                    fill_c, line_c = _get_highlight_color(cat)
+                    fill_c, line_c = _HIGHLIGHT_COLORS[cat]
                     xs, ys = _polygon_xy_lists(segment_poly)
                     fig.add_trace(go.Scatter(
                         x=xs, y=ys, mode='lines', fill='toself',
@@ -1474,7 +1396,7 @@ def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
                         showlegend=False,
                     ))
                     continue
-                fill_c, line_c = _get_highlight_color(cat)
+                fill_c, line_c = _HIGHLIGHT_COLORS[cat]
                 line_w = 1.5
             else:
                 fill_c, line_c, line_w = _FADED_COLOR, _FADED_LINE, 0.5
@@ -1545,39 +1467,28 @@ def build_plan_figure(plan_data, click_grid_spacing=0.5, selected_guid=None,
             hoverinfo='skip', showlegend=False,
         ))
 
-    # 설비(조명/센서/소방장치 등): 선택된 Space 안에 있는 것만, 클래스별로 다른 색 마커로 표시.
-    # active_categories가 주어지면(범례 필터) 그 집합에 없는 설비 클래스는 표시하지 않는다.
+    # 설비(조명/센서/소방장치): 선택된 Space 안에 있는 것만 노란 마커로 표시
     if equipment_entities:
-        by_class = defaultdict(list)
+        ex, ey, etext = [], [], []
         for e in equipment_entities:
-            cls = e.is_a()
-            if active_set is not None and cls not in active_set:
-                continue
-            by_class[cls].append(e)
-
-        for cls, ents in by_class.items():
-            ex, ey, etext = [], [], []
-            for e in ents:
-                poly = get_footprint_polygon(e)
-                if poly is not None and not poly.is_empty:
-                    c = poly.centroid
-                    ex.append(c.x); ey.append(c.y)
-                else:
-                    # 형상이 없으면 배치 좌표(ObjectPlacement)라도 사용
-                    try:
-                        import ifcopenshell.util.placement as plc
-                        m = plc.get_local_placement(e.ObjectPlacement)
-                        ex.append(float(m[0, 3])); ey.append(float(m[1, 3]))
-                    except Exception:
-                        continue
-                etext.append(f"{e.is_a()} {e.Name or ''}".strip())
-            if not ex:
-                continue
-            marker_color, marker_line = _get_highlight_color(cls) if cls in _CLASS_HIGHLIGHT_PALETTE else (_EQUIPMENT_COLOR, 'rgba(120,100,0,1)')
+            poly = get_footprint_polygon(e)
+            if poly is not None and not poly.is_empty:
+                c = poly.centroid
+                ex.append(c.x); ey.append(c.y)
+            else:
+                # 형상이 없으면 배치 좌표(ObjectPlacement)라도 사용
+                try:
+                    import ifcopenshell.util.placement as plc
+                    m = plc.get_local_placement(e.ObjectPlacement)
+                    ex.append(float(m[0, 3])); ey.append(float(m[1, 3]))
+                except Exception:
+                    continue
+            etext.append(f"{e.is_a()} {e.Name or ''}".strip())
+        if ex:
             fig.add_trace(go.Scatter(
                 x=ex, y=ey, mode='markers',
-                marker=dict(size=11, color=marker_color, symbol='diamond',
-                            line=dict(width=1, color=marker_line)),
+                marker=dict(size=11, color=_EQUIPMENT_COLOR, symbol='diamond',
+                            line=dict(width=1, color='rgba(120,100,0,1)')),
                 text=etext, hoverinfo='text', showlegend=False,
             ))
 
