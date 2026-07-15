@@ -309,8 +309,11 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
                 '(build_floor_category_highlight 함수가 없는 구버전이 배포되어 있습니다).'
             )
 
-    active_categories_for_plot = {floor_category} if (floor_category and highlight_map is not None
-                                                       and detail is None) else None
+    if floor_category and highlight_map is not None and detail is None:
+        expand_fn = getattr(fc, 'expand_category', None)
+        active_categories_for_plot = expand_fn(floor_category) if expand_fn else {floor_category}
+    else:
+        active_categories_for_plot = None
 
     try:
         fig = fc.build_plan_figure(
@@ -387,9 +390,20 @@ def _render_legend_filter():
         for col, (cat_key, cat_label, cat_color) in zip(cols, row):
             with col:
                 is_active = (cat_key == active_cat)
-                if st.button(cat_label, key=f'legend_btn_{cat_key}',
-                             type='primary' if is_active else 'secondary',
-                             width='stretch'):
+                btn_key = f'legend_btn_{cat_key}'
+                # 버튼 배경색을 평면도에서 실제로 쓰이는 강조색과 동일하게 CSS로 직접 지정
+                # (요청사항: 버튼 색만 보고도 평면도에서 무슨 색으로 나올지 바로 알 수 있게).
+                # Streamlit이 위젯 key를 'st-key-{key}' CSS 클래스로 노출해주는 것을 이용.
+                border = '3px solid #1c2521' if is_active else '1px solid rgba(0,0,0,0.25)'
+                st.markdown(
+                    f'<style>.st-key-{btn_key} button {{'
+                    f'background-color: {cat_color} !important;'
+                    f'color: #ffffff !important; border: {border} !important;'
+                    f'text-shadow: 0 1px 2px rgba(0,0,0,0.6);'
+                    f'}}</style>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(cat_label, key=btn_key, width='stretch'):
                     if is_active:
                         # 이미 활성화된 버튼을 다시 누르면 해제(전체 보기로 복귀)
                         st.session_state['floor_highlight_category'] = None

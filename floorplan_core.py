@@ -1335,11 +1335,13 @@ _CLASS_HIGHLIGHT_PALETTE = {
 
 
 def _get_highlight_color(cat):
-    """카테고리(벽 4종 또는 IFC 클래스명)에 대응하는 (fill, line) 색을 반환.
+    """카테고리(벽 4종/합집합 2종 또는 IFC 클래스명)에 대응하는 (fill, line) 색을 반환.
     등록되지 않은 클래스는 이름 해시 기반으로 일관된 색을 생성해 항상 같은 클래스가
     같은 색으로 보이게 한다(세션 간에도 동일)."""
     if cat in _HIGHLIGHT_COLORS:
         return _HIGHLIGHT_COLORS[cat]
+    if cat in _UNION_CATEGORY_COLORS:
+        return _UNION_CATEGORY_COLORS[cat]
     if cat in _CLASS_HIGHLIGHT_PALETTE:
         return _CLASS_HIGHLIGHT_PALETTE[cat]
     h = abs(hash(cat)) % 360
@@ -1353,6 +1355,8 @@ def _category_label(cat):
         'wall_internal_estimated': '내벽(추정-관계기반)',
         'wall_external_confirmed': '외벽(판정됨)',
         'wall_external_unknown': '외벽(판정불가)',
+        'wall_internal_union': '내벽 전체(확정+추정)',
+        'wall_external_union': '외벽 전체(판정+판정불가)',
     }
     if cat in _WALL_LABELS:
         return _WALL_LABELS[cat]
@@ -1417,13 +1421,36 @@ def build_floor_category_highlight(ifc_file, plan_data, wall_classification):
     return highlight_map, equipment_entities
 
 
+# 내벽/외벽 "합집합" 범례 버튼용: 실제 부재는 이 키 자체로 분류되지 않고(부재의 진짜
+# 카테고리는 항상 4종 중 하나), 이 버튼을 눌렀을 때 어떤 실제 카테고리들을 한꺼번에
+# 활성화할지 나타내는 '가상 카테고리'다.
+UNION_CATEGORY_EXPANSIONS = {
+    'wall_internal_union': ('wall_internal', 'wall_internal_estimated'),
+    'wall_external_union': ('wall_external_confirmed', 'wall_external_unknown'),
+}
+_UNION_CATEGORY_COLORS = {
+    # 두 실제 카테고리 색의 중간값 정도로 - 범례 버튼 표시용(실제 렌더링은 부재별 진짜
+    # 카테고리 색을 그대로 씀. 이 색은 '이 버튼이 대충 이런 계열이다'를 보여주는 용도).
+    'wall_internal_union': ('rgba(75,145,235,0.8)', 'rgba(20,80,170,1.0)'),
+    'wall_external_union': ('rgba(230,140,110,0.8)', 'rgba(170,70,30,1.0)'),
+}
+
+
+def expand_category(cat):
+    """범례에서 클릭된 카테고리 키를, 실제로 active_categories 필터에 넣어야 할
+    카테고리들의 집합으로 펼친다. 합집합 버튼(예: 'wall_internal_union')이면 그 안의
+    실제 카테고리 여러 개로, 일반 카테고리면 그 자신 하나짜리 집합으로 반환한다."""
+    return set(UNION_CATEGORY_EXPANSIONS.get(cat, (cat,)))
+
+
 def get_legend_items():
     """평면도 범례에 표시할 전체 카테고리 목록을 (카테고리키, 한글라벨, fill색상) 튜플
     리스트로 반환한다. 특정 공간의 실제 관련부재가 아니라, 앱이 표시할 수 있는 모든
     카테고리를 고정된 순서로 나열한 것 - 범례 필터 UI가 매번 같은 항목 구성을 갖도록.
-    순서: 벽 4종 -> 벽 이외 구조부재 각 클래스 -> 설비 각 클래스."""
+    순서: 벽 4종(상세) -> 내벽/외벽 합집합 2종 -> 벽 이외 구조부재 각 클래스 -> 설비 각 클래스."""
     wall_categories = ['wall_internal', 'wall_internal_estimated',
-                        'wall_external_confirmed', 'wall_external_unknown']
+                        'wall_external_confirmed', 'wall_external_unknown',
+                        'wall_internal_union', 'wall_external_union']
     nonwall_classes = [c for c in ite.ELEMENT_CLASSIFICATION_TARGET_CLASSES
                         if c not in ('IfcWall', 'IfcWallStandardCase')]
     equipment_classes = list(EQUIPMENT_CLASSES)
