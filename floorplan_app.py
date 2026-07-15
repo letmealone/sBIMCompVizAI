@@ -339,8 +339,17 @@ def _render_legend_filter():
     """평면도 범례를 인터랙티브 필터로 렌더링한다. 벽 이외 부재/설비를 하나로 뭉뚱그리지
     않고 개별 클래스별 항목으로 나열하며, 선택 해제한 항목은 양쪽 평면도 모두에서
     옅게(배경처럼) 처리된다(기본은 전체 선택 = 기존과 동일하게 전부 강조 표시).
-    반환: 현재 활성화된 카테고리 집합(set)."""
-    items = fc.get_legend_items()
+    반환: 현재 활성화된 카테고리 집합(set), 또는 floorplan_core.py가 구버전이라
+    get_legend_items가 없으면 None(필터 없이 기존 방식대로 전체 강조 표시)."""
+    get_items_fn = getattr(fc, 'get_legend_items', None)
+    if get_items_fn is None:
+        st.caption(
+            '🎨 범례: 내부/외부 벽 + 관련부재 + 설비 (구버전 floorplan_core.py가 배포되어 '
+            '개별 항목 필터는 비활성화됨 - floorplan_core.py를 최신본으로 교체해주세요)'
+        )
+        return None
+
+    items = get_items_fn()
     options = [key for key, _label, _color in items]
     labels = {key: label for key, label, _color in items}
 
