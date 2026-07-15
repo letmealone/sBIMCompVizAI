@@ -736,17 +736,21 @@ def _collinear_overlap_segment(seg1, seg2, line_tol=0.02, min_overlap=0.05):
     return (tuple(p_start), tuple(p_end))
 
 
-def _space_wall_edge_overlap_local_x_range(wall_footprint, space_footprint, member_m_inv):
+def _space_wall_edge_overlap_local_points(wall_footprint, space_footprint, member_m_inv):
     """ConnectionGeometry가 없을 때의 대안(2차 방법): 벽과 공간 폴리곤을 2D 면적으로
     겹치면(intersection) 실측상 거의 항상 0㎡가 나온다(공간은 보통 벽 안쪽 면까지 딱
     맞춰 모델링되어 서로 침범하지 않고 '변(edge)'만 공유하기 때문 - 실측으로 확인됨).
     그래서 면적 교집합 대신, 두 폴리곤의 '변'끼리 같은 직선 위에서 겹치는 구간을 직접
-    찾아 그 구간을 벽의 로컬좌표계 X범위로 변환해 반환한다.
-    반환: (x_min, x_max) 또는 겹치는 변이 없으면 None."""
+    찾아 그 구간의 점들을 벽의 로컬좌표(mm)로 변환해 반환한다.
+    반환: [(x,y), ...] 로컬좌표 점 리스트, 또는 겹치는 변이 없으면 None.
+    (X뿐 아니라 Y도 반환하는 이유: 벽이 건물 외곽 전체를 감싸는 등 단순 직사각형이
+    아닌 복잡한 형상일 때, X범위만으로 클리핑하면서 Y범위는 벽 전체 폭을 그대로 쓰면
+    물리적으로 먼 곳까지 잘려나오는 문제가 실측으로 확인되어, Y범위도 겹침 지점
+    주변으로 좁혀야 한다.)"""
     wall_edges = _polygon_edges(wall_footprint)
     space_edges = _polygon_edges(space_footprint)
 
-    local_xs = []
+    local_pts = []
     for we in wall_edges:
         for se in space_edges:
             overlap = _collinear_overlap_segment(we, se)
@@ -754,11 +758,9 @@ def _space_wall_edge_overlap_local_x_range(wall_footprint, space_footprint, memb
                 continue
             for (wx, wy) in overlap:
                 local_pt = member_m_inv @ np.array([wx * 1000.0, wy * 1000.0, 0.0, 1.0])
-                local_xs.append(local_pt[0])
+                local_pts.append((local_pt[0], local_pt[1]))
 
-    if not local_xs:
-        return None
-    return min(local_xs), max(local_xs)
+    return local_pts if local_pts else None
 
 
 def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_footprint_polygon):
@@ -788,8 +790,10 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
     except Exception:
         return None
 
+    space_footprint = get_footprint_polygon(space_entity)  # 근접성 필터(아래)에도 재사용
+
     rels = _get_boundary_index(ifc_file).get(wall_entity.GlobalId, [])
-    local_xs = []
+    local_pts = []
     for r in rels:
         if r.RelatingSpace != space_entity:
             continue
@@ -811,25 +815,28 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
         for (u, v) in pts2d:
             world_pt = world_m @ np.array([u, v, 0.0, 1.0])
             local_pt = member_m_inv @ np.array([world_pt[0], world_pt[1], world_pt[2], 1.0])
-            local_xs.append(local_pt[0])
+            local_pts.append((local_pt[0], local_pt[1]))
 
-    method = 'ConnectionGeometry' if local_xs else None
+    method = 'ConnectionGeometry' if local_pts else None
 
-    if not local_xs:
+    if not local_pts:
         # 2차: ConnectionGeometry 없음 -> 벽-공간 폴리곤의 변(edge) 겹침으로 대체 시도
-        space_footprint = get_footprint_polygon(space_entity)
         if space_footprint is not None and wall_footprint_polygon is not None:
-            x_range = _space_wall_edge_overlap_local_x_range(
+            edge_pts = _space_wall_edge_overlap_local_points(
                 wall_footprint_polygon, space_footprint, member_m_inv)
-            if x_range is not None:
-                local_xs = list(x_range)
+            if edge_pts is not None:
+                local_pts = edge_pts
                 method = 'edge겹침추정'
 
-    if not local_xs:
+    if not local_pts:
         return None  # 1차/2차 모두 실패 -> 호출부가 벽 전체로 폴백
 
+    # 클리핑 박스: X(길이방향)는 실제 겹침이 확인된 지점 기준으로 좁히고, Y(두께방향)는
+    # 벽 전체의 로컬 Y범위를 그대로 쓴다(축을 임의로 재추정하지 않음 - 아래 버퍼 트림이
+    # 안전장치 역할을 하므로 여기서는 단순하게 간다).
     margin = 50.0  # mm, 경계에 딱 붙어 잘리는 것을 막기 위한 여유
-    x_min, x_max = min(local_xs) - margin, max(local_xs) + margin
+    xs = [p[0] for p in local_pts]
+    x_min, x_max = min(xs) - margin, max(xs) + margin
 
     if wall_footprint_polygon is None or wall_footprint_polygon.is_empty:
         return None
@@ -892,6 +899,30 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
             world_polys.append(wp)
     if not world_polys:
         return None
+
+    # 근접성 트림(중요): 벽이 건물 외곽 전체를 감싸는 등 '길이축' 개념이 물리적으로
+    # 여러 번 꺾이는 하나의 거대한 부재인 경우, X범위 클리핑만으로는 이 공간과 실제로
+    # 접한 부분 너머까지 하나로 이어진 채(같은 조각 안에서) 멀리 뻗어나올 수 있음이
+    # 실측으로 확인됐다(예: 공간은 6m 구간만 접했는데 결과 폴리곤은 20m 구간을 덮음).
+    # 그래서 최종 결과를 "공간 footprint를 프록시미티 여유만큼 부풀린 영역"과 다시
+    # 한번 교집합시켜, 실제로 공간 근처에 있는 부분만 남긴다 - 벽의 로컬 축이 어떤
+    # 의미인지 추측할 필요 없이(X/Y 어느 쪽이 두께인지 몰라도) 항상 안전하게 동작한다.
+    proximity_buffer_m = 0.5  # m (벽 두께+공간-벽 사이 여유를 넉넉히 포함)
+    if space_footprint is not None:
+        trim_region = space_footprint.buffer(proximity_buffer_m)
+        trimmed = []
+        for wp in world_polys:
+            t = wp.intersection(trim_region)
+            if t.is_empty:
+                continue
+            if t.geom_type == 'Polygon':
+                trimmed.append(t)
+            elif t.geom_type == 'MultiPolygon':
+                trimmed.extend(g for g in t.geoms if g.geom_type == 'Polygon' and not g.is_empty)
+        if not trimmed:
+            return None  # 공간 근처에 남는 부분이 전혀 없으면 신뢰 못함 -> 호출부가 벽 전체로 폴백
+        world_polys = trimmed
+
     result = world_polys[0] if len(world_polys) == 1 else MultiPolygon(world_polys)
     return result, method
 
