@@ -355,29 +355,15 @@ def get_element_hover_info(ent, wall_classification=None):
     return "<br>".join(lines)
 
 
-def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None, ifc_file=None):
+def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None):
     """해당 층의 Space + 구조요소들의 footprint 폴리곤을 미리 계산해 리스트로 반환.
     반환: {'spaces': [{'guid','name','polygon'}...],
            'structural': [{'guid','class','name','polygon','hover'}...]}
     (지오메트리 계산은 비용이 있으므로 앱에서 층 변경시에만 1회 호출하도록 캐싱 권장.
     hover 텍스트도 여기서 미리 만들어 캐싱 대상에 포함시킨다 - 매 렌더링마다 다시
-    치수/속성을 파싱하면 비용이 반복되므로 층 변경시 1회만 계산되게 하기 위함)
-
-    ifc_file(선택): 주어지면 precompute_storey_geometry()가 이미 계산해둔 층별 부재
-    footprint 캐시(_get_storey_candidate_footprints)를 재사용한다. PLAN_STRUCTURAL_CLASSES
-    (이 함수가 그리는 벽/기둥/보/바닥/커튼월/문/창)가 ELEMENT_CLASSIFICATION_TARGET_CLASSES
-    (사전계산 대상)의 완전한 부분집합이라, 캐시를 재사용하지 않으면 파일 업로드 직후
-    사전계산한 것과 똑같은 지오메트리를 층 선택시 또 한 번 계산하는 중복이 발생했었다
-    (실측으로 확인된 비효율 - ifcopenshell 지오메트리 커널 호출은 비용이 크다)."""
+    치수/속성을 파싱하면 비용이 반복되므로 층 변경시 1회만 계산되게 하기 위함)"""
     spaces_raw = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
     structural_raw = get_elements_for_storey(storey_entity, classes=set(PLAN_STRUCTURAL_CLASSES))
-
-    cached_footprints = {}
-    if ifc_file is not None:
-        storey_ifc = storey_entity['entity'] if isinstance(storey_entity, dict) else storey_entity
-        cache_key = (id(ifc_file), storey_ifc.GlobalId)
-        for el, fp in _storey_candidate_footprint_cache.get(cache_key, []):
-            cached_footprints[el.GlobalId] = fp
 
     spaces = []
     for sp in spaces_raw:
@@ -388,9 +374,7 @@ def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None, if
 
     structural = []
     for el in structural_raw:
-        poly = cached_footprints.get(el.GlobalId)
-        if poly is None:
-            poly = get_footprint_polygon(el, tol=tol)
+        poly = get_footprint_polygon(el, tol=tol)
         if poly is None:
             continue
         hover = get_element_hover_info(el, wall_classification=wall_classification)

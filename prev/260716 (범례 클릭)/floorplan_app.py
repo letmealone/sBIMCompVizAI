@@ -123,10 +123,10 @@ def _precompute_storey_geometry_cached(data, file_hash, label):
     return _session_cache(f'storey_geom_precomputed_{file_hash}', _compute)
 
 
-def _build_plan_cached(storeys, storey_name, cache_tag, wall_classification=None, ifc_file=None):
+def _build_plan_cached(storeys, storey_name, cache_tag, wall_classification=None):
     def _compute():
         storey = next(s for s in storeys if s['Name'] == storey_name)
-        return fc.build_storey_plan_data(storey, wall_classification=wall_classification, ifc_file=ifc_file)
+        return fc.build_storey_plan_data(storey, wall_classification=wall_classification)
     with st.spinner('해당 층 도면 지오메트리 계산 중...'):
         return _session_cache(f'plan_{cache_tag}_{storey_name}', _compute)
 
@@ -739,9 +739,9 @@ if file_a and file_b:
     st.caption('층은 왼쪽 사이드바 "🏢 층 선택"에서 바꿀 수 있습니다.')
 
     plan_a = _build_plan_cached(data_a['storeys'], selected_a_name, f'left_{file_hash_a}',
-                                 wall_classification=data_a['wall_classification'], ifc_file=data_a['ifc_file'])
+                                 wall_classification=data_a['wall_classification'])
     plan_b = _build_plan_cached(data_b['storeys'], selected_b_name, f'right_{file_hash_b}',
-                                 wall_classification=data_b['wall_classification'], ifc_file=data_b['ifc_file'])
+                                 wall_classification=data_b['wall_classification'])
 
     space_a_to_b, space_b_to_a = {}, {}
     pair_labels_a, pair_labels_b = None, None
