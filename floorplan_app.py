@@ -229,14 +229,16 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
 
     equipment_entities = None
     highlight_map = None
+    wall_segments = None
     if detail is not None and sp_entry is not None:
         highlight_map = detail['highlight_map']
+        wall_segments = detail.get('wall_segment_polygons')
         equipment_entities = fc.get_space_contained_equipment(data['ifc_file'], sp_entry['entity'])
 
     fig = fc.build_plan_figure(
         plan, selected_guid=selected_guid,
         highlight_map=highlight_map, equipment_entities=equipment_entities,
-        pair_labels=pair_labels,
+        pair_labels=pair_labels, wall_segments=wall_segments,
     )
     event = st.plotly_chart(
         fig, key=f'{session_prefix}_plot', on_select='rerun',
