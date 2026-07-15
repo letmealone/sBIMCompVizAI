@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>SBIM CompViz AI — IFC 평면도 비교 도구 기술 보고서</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<style>
+  :root {
+    --ink: #1c2521;
+    --paper: #fbfaf7;
+    --line: #dcd8cd;
+    --accent: #2f6f5e;
+    --accent-soft: #e4efe9;
+    --warn: #9a5b2a;
+    --warn-soft: #f6ead9;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    --serif: Georgia, 'Noto Serif KR', serif;
+    --sans: -apple-system, 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); line-height: 1.7; font-size: 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 64px 28px 120px; }
+  header.hero {
+    border-bottom: 3px solid var(--ink); padding-bottom: 28px; margin-bottom: 44px;
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 14px;
+  }
+  h1 {
+    font-family: var(--serif); font-size: 2.5rem; margin: 0 0 14px; line-height: 1.2;
+    letter-spacing: -0.01em;
+  }
+  .subtitle { font-size: 1.08rem; color: #4b564f; max-width: 640px; }
+  .callout {
+    background: var(--accent-soft); border-left: 4px solid var(--accent);
+    padding: 18px 22px; border-radius: 4px; margin: 28px 0; font-size: 1rem;
+  }
+  .callout strong { color: var(--accent); }
+  h2 {
+    font-family: var(--serif); font-size: 1.55rem; margin: 56px 0 18px;
+    padding-top: 16px; border-top: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  h2 .num {
+    font-family: var(--mono); font-size: 0.85rem; color: #9a978c;
+    font-weight: 400;
+  }
+  h3 {
+    font-family: var(--sans); font-size: 1.1rem; margin: 30px 0 12px; color: var(--accent);
+    font-weight: 700;
+  }
+  p { margin: 0 0 14px; }
+  code {
+    font-family: var(--mono); background: #efece3; padding: 1px 6px;
+    border-radius: 4px; font-size: 0.88em;
+  }
+  table {
+    width: 100%; border-collapse: collapse; margin: 18px 0 24px; font-size: 0.94rem;
+  }
+  th, td {
+    text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono); font-size: 0.78rem; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #6d7168; border-bottom: 2px solid var(--ink);
+  }
+  tr:hover td { background: #f4f2ea; }
+  .pipeline {
+    font-family: var(--mono); font-size: 0.86rem; background: #12211c; color: #d9ecc9;
+    padding: 22px 24px; border-radius: 8px; margin: 24px 0; overflow-x: auto;
+    white-space: pre; line-height: 1.55;
+  }
+  .mermaid { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+             padding: 18px; margin: 24px 0; }
+  .step {
+    display: flex; gap: 16px; margin: 20px 0; align-items: flex-start;
+  }
+  .step .badge {
+    flex: none; width: 34px; height: 34px; border-radius: 50%;
+    background: var(--ink); color: var(--paper); font-family: var(--mono);
+    display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
+  }
+  .step .body strong { display: block; margin-bottom: 4px; }
+  .limits {
+    background: var(--warn-soft); border-left: 4px solid var(--warn);
+    padding: 18px 22px; border-radius: 4px; margin: 16px 0;
+  }
+  .limits li { margin-bottom: 10px; }
+  ul, ol { padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  footer {
+    margin-top: 70px; padding-top: 20px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 0.8rem; color: #8b8878;
+  }
+  .file-table td:first-child, .file-table th:first-child { font-family: var(--mono); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">기술 보고서 · 2026-07-15 기준</div>
+  <h1>SBIM CompViz AI<br>IFC 평면도 비교 도구</h1>
+  <p class="subtitle">전문가가 만든 IFC와 AI가 생성한 IFC를 층·공간 단위로 자동 매칭해
+  평면도로 시각 비교하고, 부재(벽·기둥·문·창·설비 등) 구성 차이를 정량적으로
+  엑셀 비교해주는 Streamlit 애플리케이션입니다.</p>
+</header>
+
+<div class="callout">
+  <strong>한 줄 요약</strong> — "같은 건물"을 그린 두 IFC 파일을 넣으면, 층과 공간을
+  자동으로 짝지어 나란히 비교하고, 그 공간에 어떤 부재가 얼마나(개수·면적) 있는지까지
+  비교해줍니다.
+</div>
+
+<div class="pipeline">[전문가 IFC]        [AI IFC]
+      │                 │
+      └────────┬────────┘
+               ▼
+   ① 층 자동 매칭 (표고 또는 AI/LLM)
+               ▼
+   ② 공간 자동 매칭 (면적 + 위치 유사도)
+               ▼
+   ③ 화면에서 평면도 나란히 보기 (클릭 / hover)
+               ▼
+   ④ 엑셀로 정량 비교 결과 내려받기 (zip)</div>
+
+<h2><span class="num">01</span>입력</h2>
+<table>
+<tr><th>입력</th><th>설명</th></tr>
+<tr><td>IFC 파일 2개</td><td>"전문가(A)"와 "AI(B)" — 같은 건물을 각각 다른 모델러/도구로 작성한 <code>.ifc</code> 파일</td></tr>
+<tr><td>공간 매칭 임계값 <span style="color:#9a978c">(옵션)</span></td><td>면적 오차 허용치(㎡, 기본 2.0), 공간 중심점 거리 허용치(m, 기본 1.0)</td></tr>
+<tr><td>AI 층 매핑 사용 여부 <span style="color:#9a978c">(옵션)</span></td><td>켜면 Google Gemini(<code>gemini-3.1-flash-lite</code>)로 층 이름·표고·공간구성 유사도를 종합 판단. 끄면 표고만으로 자동 매칭</td></tr>
+<tr><td>Google AI API Key <span style="color:#9a978c">(옵션)</span></td><td>AI 층 매핑 사용시에만 필요</td></tr>
+</table>
+
+<h2><span class="num">02</span>전체 처리 파이프라인</h2>
+
+<div class="mermaid">
+flowchart TD
+    A[IFC 파일 2개 업로드] --> B[파싱 + 층별 부재 지오메트리 사전계산]
+    B --> C{층 매칭 방식}
+    C -->|기본| D[표고 기반 통계적 매칭]
+    C -->|옵션| E["AI(Gemini) 매칭 — 이름·표고·공간구성 종합, 파일쌍당 API 1회"]
+    D --> F[공간 자동 매칭 — 면적 + 중심점 유사도]
+    E --> F
+    F --> G[공간에 접한 부재 탐지 — 관계 + 지오메트리 보강]
+    G --> H[벽 내/외부 판정 — 3단계 자동 폴백]
+    H --> I[면적 산정 — 4단계 자동 폴백]
+    I --> J[평면도 시각화 — 클릭/hover, 벽 구간 클리핑]
+    I --> K[엑셀 비교 결과 — zip 다운로드]
+</div>
+
+<h3>2.1 IFC 파싱 및 사전계산</h3>
+<p>파일을 올리면 층·공간·벽 내/외부 판정을 미리 계산합니다. <strong>층별 부재 지오메트리는
+업로드 직후 한 번만 사전계산</strong>해 캐싱하므로, 이후 공간을 클릭할 때마다 느껴지던
+지연이 없어집니다.</p>
+
+<h3>2.2 층 매칭</h3>
+<div class="step">
+  <div class="badge">A</div>
+  <div class="body"><strong>표고 기반(기본)</strong>각 층의 표고(고도) 차이를 통계적으로 비교해 자동 매칭</div>
+</div>
+<div class="step">
+  <div class="badge">B</div>
+  <div class="body"><strong>AI(Gemini) 기반(옵션)</strong>층 이름의 문맥(예: "1층"="Level 1"="1F"), 표고,
+  그 층의 공간 구성(방 종류·개수)까지 종합 판단합니다. <strong>IFC 파일쌍 하나당 API를
+  정확히 1회만 호출</strong>하도록 설계되어 있으며, 분당 요청/토큰 한도를 넘지 않도록
+  자동으로 대기·재시도합니다.</div>
+</div>
+
+<h3>2.3 공간 매칭</h3>
+<p>매칭된 층 쌍마다 공간의 <strong>면적</strong>과 <strong>중심점 위치</strong>(좌표계
+평행이동 보정 포함)가 임계값 이내로 가까우면 같은 공간으로 간주해 번호 배지를 붙여
+양쪽 평면도에 표시합니다.</p>
+
+<h3>2.4 공간에 접한 부재 찾기</h3>
+<p>IFC 표준상 "이 벽이 이 공간과 접해있다"는 <code>IfcRelSpaceBoundary</code> 관계로
+기록됩니다. 다만 실제 파일에서 이 관계가 누락된 경우가 드물지 않게 발견되어,
+<strong>관계로 못 찾은 부재도 같은 층 안에서 실제로 맞닿아 있는지(지오메트리 거리)를
+추가로 검사</strong>해 보완합니다.</p>
+
+<h3>2.5 벽 내/외부 판정 — 3단계 자동 폴백</h3>
+<ol>
+  <li><strong>1차</strong>: <code>Pset_*Common.IsExternal</code> 속성값이 있으면 그대로 사용 (가장 신뢰도 높음)</li>
+  <li><strong>2차</strong>: 없으면 벽에 접한 공간들의 경계면 좌표로 "양쪽 면 모두에 공간이 있는지" 확인 → 있으면 내벽</li>
+  <li><strong>3차(추정)</strong>: 좌표 정보 자체가 없으면 서로 다른 공간 2개 이상과 관계가 있는지만으로 내벽 추정 (근거 가장 약함, "(추정)" 표시)</li>
+</ol>
+
+<h3>2.6 면적 산정 — 4단계 자동 폴백 (핵심 로직)</h3>
+<p>공간 하나에 접한 벽의 면적을 "그 공간 몫"만큼 나누는 문제를, 데이터 품질에 따라
+아래 순서로 더 정밀한 방법을 자동으로 시도합니다.</p>
+<table>
+<tr><th>단계</th><th>방법</th><th>필요 데이터</th></tr>
+<tr><td>1차</td><td>경계면 좌표를 직접 적분해 정밀 계산 + 정합성 자동검증</td><td>ConnectionGeometry(2단계 경계 좌표)</td></tr>
+<tr><td>2차</td><td>화면에 보여주는 것과 <strong>동일한</strong> 벽 구간 클리핑 결과 활용</td><td>ConnectionGeometry 또는 공간·벽 폴리곤의 변(edge) 겹침</td></tr>
+<tr><td>3차</td><td>공간 footprint를 살짝 부풀려 벽과 겹치는 비율로 근사</td><td>공간·벽 자체 형상(항상 존재)</td></tr>
+<tr><td>보조</td><td>벽 자체 면적값(<code>Gross_Side_Area</code>)이 없거나 빈 값이면 전체 bounding 치수(폭×높이)로 자동 대체</td><td>벽 지오메트리</td></tr>
+</table>
+<p><strong>중요</strong>: 평면도에 표시되는 "실제 접한 구간" 하이라이트와 엑셀에 찍히는
+면적 숫자는 <strong>같은 계산 결과를 공유</strong>하도록 만들어 두 값이 항상 일치합니다.</p>
+
+<h3>2.7 평면도 시각화</h3>
+<ul>
+  <li>공간 내부 클릭(또는 드롭다운 선택) → 상세 정보 표시</li>
+  <li>자동 매칭된 공간은 옅은 색, <strong>선택된 공간은 접한 벽이 카테고리별(내벽=파랑/외벽=주황/설비=노랑)</strong>로 하이라이트</li>
+  <li>벽은 전체가 아니라 <strong>실제로 접한 부분만</strong> 진하게 표시(나머지는 옅게, 맥락용)</li>
+  <li>부재에 마우스를 올리면 치수·면적·재질·내외벽 판정 표시</li>
+</ul>
+
+<h2><span class="num">03</span>출력</h2>
+
+<h3>3.1 화면 (Streamlit)</h3>
+<p>두 IFC의 선택된 층 평면도를 나란히 표시하고, 클릭한 공간의 면적·접한 부재 요약·
+내외벽 구분·산출방식(정밀/추정 여부)을 함께 보여줍니다.</p>
+
+<h3>3.2 엑셀 (zip 파일 하나로 다운로드)</h3>
+<table>
+<tr><th>파일</th><th>내용</th></tr>
+<tr><td><code>01_전문가IFC_추출.xlsx</code></td><td>전문가 IFC의 전체 부재 목록/속성</td></tr>
+<tr><td><code>02_AI_IFC_추출.xlsx</code></td><td>AI IFC의 전체 부재 목록/속성 (동일 형식)</td></tr>
+<tr><td><code>03_층공간매칭_비교결과.xlsx</code></td><td>아래 7개 시트로 구성된 비교 결과</td></tr>
+</table>
+
+<table>
+<tr><th>시트명</th><th>내용</th></tr>
+<tr><td><code>01_층_매칭</code></td><td>층 매핑 테이블 (AI 매핑시 확신도·판단근거 포함)</td></tr>
+<tr><td><code>02_공간_매칭</code></td><td>전체 층에 걸친 공간 매칭 테이블 (면적차/centroid거리 포함)</td></tr>
+<tr><td><code>03_구조부재_내외구분비교</code></td><td>매칭된 공간마다 벽·기둥·문·창 등을 내부/외부/판정불가로 나눠 개수·면적 비교</td></tr>
+<tr><td><code>03b_구조부재_통합비교</code></td><td>위 항목을 내/외부 구분 없이 클래스별로만 비교</td></tr>
+<tr><td><code>03c_층단위_부재비교</code></td><td>공간 매칭과 무관하게 층 전체 단위로 부재 비교(계산량 적음)</td></tr>
+<tr><td><code>04_설비_비교</code></td><td>조명/센서/소방장치/경보기 등 설비 개수 비교</td></tr>
+<tr><td><code>05_미매칭공간_객체요약</code></td><td>대응 공간을 못 찾은 공간들의 부재 구성 요약</td></tr>
+</table>
+
+<h2><span class="num">04</span>알려진 한계</h2>
+<div class="limits">
+<ul>
+  <li><strong>IFC 데이터 품질에 크게 좌우됩니다.</strong> 특히 <code>RelSpaceBoundary</code>의
+  2단계 경계 좌표(<code>ConnectionGeometry</code>)가 없는 파일은 근사 방법으로 자동
+  전환되며, 정밀도가 다소 낮아질 수 있습니다(화면·엑셀 모두 산출방식이 표시됨).</li>
+  <li><strong><code>03_구조부재_내외구분비교</code>(공간별)와 <code>03c_층단위_부재비교</code>
+  (층 전체)의 면적 합계는 일치하지 않을 수 있습니다.</strong> 내벽은 양쪽 공간에서 각각
+  카운트되지만 층단위는 부재당 한 번만 세기 때문으로, 서로 다른 질문에 답하는
+  지표입니다(오차 아님).</li>
+  <li><strong>AI 층 매핑은 무료 API 할당량(분당 요청 수 등) 안에서만 재시도합니다.</strong>
+  일일 한도는 API 키/프로젝트 단위라 이 앱이 직접 통제할 수 없습니다.</li>
+</ul>
+</div>
+
+<h2><span class="num">05</span>빠른 시작</h2>
+<ol>
+  <li>Streamlit 앱 접속 → 전문가 IFC, AI IFC 각각 업로드</li>
+  <li>(자동) 층별 부재 지오메트리 사전계산 진행률 표시 → 완료 대기</li>
+  <li>사이드바에서 층 선택(자동 매칭됨) → 평면도에서 공간 클릭</li>
+  <li>필요시 사이드바 "공간 자동 매핑", "AI 층 매핑" 옵션 켜기</li>
+  <li>"📥 비교 엑셀(zip) 생성" 버튼 클릭 → 다운로드</li>
+</ol>
+
+<h2><span class="num">06</span>구성 파일</h2>
+<table class="file-table">
+<tr><th>파일</th><th>역할</th></tr>
+<tr><td>floorplan_app.py</td><td>Streamlit 화면 및 UI 흐름</td></tr>
+<tr><td>floorplan_core.py</td><td>IFC 파싱, 매칭, 면적 계산, 평면도 지오메트리 등 핵심 로직</td></tr>
+<tr><td>ifc_to_excel.py</td><td>단일 IFC → 엑셀 전체 추출, 면적/치수 계산 공통 함수</td></tr>
+<tr><td>llm_storey_match.py</td><td>Google Gemini 기반 AI 층 매핑</td></tr>
+<tr><td>comparison_export.py</td><td>두 IFC 비교 결과 엑셀(7개 시트) 생성</td></tr>
+</table>
+
+<footer>SBIM CompViz AI · 기술 보고서 · 문서 기준일 2026-07-15</footer>
+
+</div>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral',
+    themeVariables: { fontFamily: 'sans-serif', primaryColor: '#e4efe9',
+      primaryBorderColor: '#2f6f5e', lineColor: '#6d7168' } });
+</script>
+</body>
+</html>
