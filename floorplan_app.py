@@ -282,7 +282,7 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
     equipment_entities = None
     highlight_map = None
     wall_segments = None
-    floor_category = st.session_state.get('floor_highlight_category')
+    floor_categories = set(st.session_state.get('floor_highlight_categories') or set())
 
     if detail is not None and sp_entry is not None:
         highlight_map = detail['highlight_map']
@@ -299,7 +299,7 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
                 f"**정밀(edge겹침 추정) {precise_edge}개** / "
                 f"**전체표시(폴백) {fallback_n}개**"
             )
-    elif floor_category:
+    elif floor_categories:
         if hasattr(fc, 'build_floor_category_highlight'):
             highlight_map, equipment_entities = fc.build_floor_category_highlight(
                 data['ifc_file'], plan, data['wall_classification'])
@@ -309,9 +309,14 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
                 '(build_floor_category_highlight 함수가 없는 구버전이 배포되어 있습니다).'
             )
 
-    if floor_category and highlight_map is not None and detail is None:
+    if floor_categories and highlight_map is not None and detail is None:
         expand_fn = getattr(fc, 'expand_category', None)
-        active_categories_for_plot = expand_fn(floor_category) if expand_fn else {floor_category}
+        if expand_fn:
+            active_categories_for_plot = set()
+            for cat in floor_categories:
+                active_categories_for_plot |= expand_fn(cat)
+        else:
+            active_categories_for_plot = set(floor_categories)
     else:
         active_categories_for_plot = None
 
@@ -363,13 +368,14 @@ def _render_plot_and_get_detail(label, data, storey_name, plan, session_prefix, 
 
 def _render_legend_filter():
     """평면도 범례를 버튼으로 렌더링한다. 벽 4종(내부-확정/내부-추정/외부-판정됨/
-    외부-판정불가)은 기존 방식 그대로의 문구를 유지하고, 그 밖의 구조부재(기둥/문/창/
-    바닥/지붕/계단 등)와 설비(조명/센서/소방장치/경보기 등)는 하나로 묶지 않고 각각
-    개별 버튼으로 추가한다.
+    외부-판정불가) + 내벽/외벽 합집합 2종은 기존 방식 그대로의 문구를 유지하고, 그 밖의
+    구조부재(기둥/문/창/바닥/지붕/계단 등)와 설비(조명/센서/소방장치/경보기 등)는 하나로
+    묶지 않고 각각 개별 버튼으로 추가한다.
 
-    각 버튼을 누르면: ① 현재 선택되어 조회 중인 공간 정보를 리셋하고, ② 그 층 전체에서
-    해당 카테고리에 속하는 부재/설비를 양쪽 평면도 모두에 강조 표시한다(공간 선택과
-    무관하게 층 전체 대상 - build_floor_category_highlight 사용).
+    여러 항목을 동시에 선택할 수 있다(누를 때마다 선택/해제 토글). 처음 하나라도 선택되면:
+    ① 현재 선택되어 조회 중인 공간 정보를 리셋하고, ② 그 층 전체에서 선택된 카테고리(들)에
+    속하는 부재/설비를 양쪽 평면도 모두에 강조 표시한다(공간 선택과 무관하게 층 전체 대상
+    - build_floor_category_highlight 사용).
     반환: 없음 (버튼 클릭시 session_state에 기록 후 st.rerun()으로 처리)."""
     get_items_fn = getattr(fc, 'get_legend_items', None)
     if get_items_fn is None:
@@ -380,16 +386,18 @@ def _render_legend_filter():
         return
 
     items = get_items_fn()
-    active_cat = st.session_state.get('floor_highlight_category')
+    state_key = 'floor_highlight_categories'
+    active_cats = set(st.session_state.get(state_key) or set())
 
-    st.caption('🎨 범례 (버튼을 누르면 현재 선택된 공간 조회를 닫고, 그 층 전체에서 해당 항목만 강조 표시합니다)')
+    st.caption('🎨 범례 (여러 항목을 동시에 선택할 수 있습니다 · 누를 때마다 선택/해제 · '
+               '하나라도 선택하면 현재 선택된 공간 조회를 닫고 그 층 전체에서 강조 표시합니다)')
     n_cols = 6
     rows = [items[i:i + n_cols] for i in range(0, len(items), n_cols)]
     for row in rows:
         cols = st.columns(n_cols)
         for col, (cat_key, cat_label, cat_color) in zip(cols, row):
             with col:
-                is_active = (cat_key == active_cat)
+                is_active = cat_key in active_cats
                 btn_key = f'legend_btn_{cat_key}'
                 # 버튼 배경색을 평면도에서 실제로 쓰이는 강조색과 동일하게 CSS로 직접 지정
                 # (요청사항: 버튼 색만 보고도 평면도에서 무슨 색으로 나올지 바로 알 수 있게).
@@ -404,22 +412,26 @@ def _render_legend_filter():
                     unsafe_allow_html=True,
                 )
                 if st.button(cat_label, key=btn_key, width='stretch'):
+                    was_empty = not active_cats
                     if is_active:
-                        # 이미 활성화된 버튼을 다시 누르면 해제(전체 보기로 복귀)
-                        st.session_state['floor_highlight_category'] = None
+                        active_cats.discard(cat_key)  # 이미 선택된 걸 다시 누르면 해제
                     else:
-                        st.session_state['floor_highlight_category'] = cat_key
-                        # 공간 선택/조회 정보 리셋 (요청사항: 범례 클릭시 기존 공간 조회 닫기)
-                        for side in ('left', 'right'):
-                            st.session_state.pop(f'{side}_selected_guid', None)
-                            st.session_state.pop(f'{side}_space_dropdown', None)
-                            st.session_state.pop(f'{side}_dropdown_sync_pending', None)
+                        active_cats.add(cat_key)
+                        if was_empty:
+                            # 아무것도 선택 안 된 상태에서 첫 항목을 고를 때만 공간 조회를
+                            # 리셋한다(이미 강조 모드인 채로 항목을 추가/해제할 때는 굳이
+                            # 다시 리셋할 필요 없음).
+                            for side in ('left', 'right'):
+                                st.session_state.pop(f'{side}_selected_guid', None)
+                                st.session_state.pop(f'{side}_space_dropdown', None)
+                                st.session_state.pop(f'{side}_dropdown_sync_pending', None)
+                    st.session_state[state_key] = active_cats
                     st.rerun()
 
-    if active_cat:
-        active_label = next((lbl for k, lbl, _c in items if k == active_cat), active_cat)
-        st.caption(f'🔎 현재 "{active_label}" 항목을 층 전체에서 강조 표시 중입니다. '
-                   '같은 버튼을 다시 누르거나 공간을 클릭하면 해제됩니다.')
+    if active_cats:
+        active_labels = [lbl for k, lbl, _c in items if k in active_cats]
+        st.caption(f'🔎 현재 {", ".join(active_labels)} 항목을 층 전체에서 강조 표시 중입니다. '
+                   '버튼을 다시 눌러 해제하거나 공간을 클릭하면 전체 해제됩니다.')
 
 
 def _render_union_table(title, left_d, right_d, label_left, label_right,
@@ -793,7 +805,7 @@ if file_a and file_b:
     if new_left:
         st.session_state['left_selected_guid'] = new_left
         st.session_state['left_dropdown_sync_pending'] = True
-        st.session_state['floor_highlight_category'] = None  # 공간을 직접 선택하면 층 전체 강조 모드는 해제
+        st.session_state['floor_highlight_categories'] = set()  # 공간을 직접 선택하면 층 전체 강조 모드는 해제
         changed = True
         if auto_map_enabled and new_left in space_a_to_b:
             st.session_state['right_selected_guid'] = space_a_to_b[new_left]
@@ -801,7 +813,7 @@ if file_a and file_b:
     if new_right:
         st.session_state['right_selected_guid'] = new_right
         st.session_state['right_dropdown_sync_pending'] = True
-        st.session_state['floor_highlight_category'] = None
+        st.session_state['floor_highlight_categories'] = set()
         changed = True
         if auto_map_enabled and new_right in space_b_to_a:
             st.session_state['left_selected_guid'] = space_b_to_a[new_right]
