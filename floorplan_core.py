@@ -175,8 +175,6 @@ def match_spaces(spaces_a, spaces_b, area_thresh=2.0, centroid_thresh=1.0):
 # ===================================================================
 
 def get_footprint_polygon(ent, tol=0.05):
-    """엔티티의 바닥면(최저 Z 근처) 삼각형들을 shapely로 합쳐 실제 footprint 폴리곤 반환.
-    형상이 없거나 계산 실패시 하위 요소(IsDecomposedBy)를 재귀적으로 탐색하여 합집합 반환."""
     try:
         shape = geom.create_shape(_SETTINGS, ent)
         verts = np.array(shape.geometry.verts).reshape(-1, 3)
@@ -200,7 +198,6 @@ def get_footprint_polygon(ent, tol=0.05):
     except Exception:
         pass
 
-    # 커튼월처럼 자체 지오메트리는 없고 하위 부품만 있는 경우 재귀 합집합 처리
     child_polys = []
     for rel in getattr(ent, 'IsDecomposedBy', []):
         for child in rel.RelatedObjects:
@@ -413,13 +410,30 @@ def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, 
     return list(by_guid.values())
 
 
+_equipment_index_cache = {}
+
+def _get_equipment_index(ifc_file):
+    """파일 내 모든 설비 배치 관계를 한 번만 순회하여 인덱싱(메모리 누수 해결 핵심)"""
+    key = id(ifc_file)
+    if key not in _equipment_index_cache:
+        index = defaultdict(list)
+        for rel in ifc_file.by_type('IfcRelContainedInSpatialStructure'):
+            sp = rel.RelatingStructure
+            if sp is not None and sp.is_a('IfcSpace'):
+                for el in rel.RelatedElements:
+                    index[sp.GlobalId].append(el)
+        _equipment_index_cache[key] = index
+    return _equipment_index_cache[key]
+
+
 def get_space_contained_equipment(ifc_file, space_entity, classes=EQUIPMENT_CLASSES):
+    """해당 Space '안에' 배치된 설비(조명/센서/소방장치 등) 목록.
+    미리 캐시된 인덱스를 사용하므로 반복 조회 시 메모리 부하가 없다."""
+    index = _get_equipment_index(ifc_file)
     equipment = []
-    for rel in ifc_file.by_type('IfcRelContainedInSpatialStructure'):
-        if rel.RelatingStructure == space_entity:
-            for el in rel.RelatedElements:
-                if el.is_a() in classes:
-                    equipment.append(el)
+    for el in index.get(space_entity.GlobalId, []):
+        if el.is_a() in classes:
+            equipment.append(el)
     return equipment
 
 
