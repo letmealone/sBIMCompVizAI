@@ -626,79 +626,6 @@ def _wall_distinct_space_count(ifc_file):
     return {gid: len(spaces) for gid, spaces in counts.items()}
 
 
-def _wall_centroid_crossing_check(ifc_file, distinct_space_count):
-    """3차 판정(관계 개수만으로 내벽 추정)의 정밀화: 서로 다른 Space가 2개 이상 걸린
-    벽이라도, 그 Space들이 '벽을 사이에 두고 마주보는지' 아니면 '벽의 같은 면에 나란히
-    붙어있을 뿐인지'를 구분하지 못하는 게 원래 3차 판정의 한계였다(실측으로 확인: 복도
-    벽 하나가 안쪽 면으로 방 3개를 순서대로 접했는데 '내벽'으로 잘못 판정된 사례).
-
-    개선안(사용자 제안): 이 벽에 걸린 Space들의 footprint 중심점을 이어보고, 그 선분이
-    벽 자신과 실제로 교차하는 쌍이 하나라도 있으면 - 벽을 사이에 두고 마주본다는 뜻이므로
-    - '진짜 양쪽 분리'로 볼 근거가 있다고 판단한다. 교차하는 쌍이 하나도 없으면(모든
-    Space가 벽의 한쪽에만 나란히 있다는 뜻) 내벽으로 볼 근거가 없다고 본다.
-
-    distinct_space_count: _wall_distinct_space_count()의 반환값(어느 벽이 3차 판정
-    후보인지 미리 걸러내는 용도 - 2개 미만이면 애초에 이 검사 자체가 필요 없음).
-
-    반환: {GlobalId: True(교차 확인, 내벽 근거 있음) / False(교차 없음, 근거 없음)}.
-    지오메트리 계산(공간/벽 footprint)이 필요해 floorplan_core를 함수 안에서 지연
-    임포트한다 - 이 함수는 floorplan_core.load_ifc()를 통해서만 호출되므로(그 시점엔
-    floorplan_core 모듈이 이미 로딩 중이라 sys.modules에 있음) 순환참조 문제는 없다."""
-    candidates = {gid for gid, n in distinct_space_count.items() if n >= 2}
-    if not candidates:
-        return {}
-
-    try:
-        import floorplan_core as fc
-        from shapely.geometry import LineString
-    except ImportError:
-        return {}  # floorplan_core를 못 불러오면(단독 실행 등) 검증 자체를 생략
-
-    wall_spaces = defaultdict(set)
-    wall_lookup = {}
-    for r in ifc_file.by_type('IfcRelSpaceBoundary'):
-        elem = r.RelatedBuildingElement
-        if elem is None or elem.GlobalId not in candidates or r.RelatingSpace is None:
-            continue
-        wall_spaces[elem.GlobalId].add(r.RelatingSpace)
-        wall_lookup[elem.GlobalId] = elem
-
-    result = {}
-    centroid_cache = {}
-    for gid, spaces in wall_spaces.items():
-        wall = wall_lookup[gid]
-        try:
-            wall_fp = fc.get_footprint_polygon(wall)
-        except Exception:
-            wall_fp = None
-        if wall_fp is None or wall_fp.is_empty:
-            continue
-
-        space_list = list(spaces)
-        crossed = False
-        for i in range(len(space_list)):
-            for sp in (space_list[i],):
-                if sp.GlobalId not in centroid_cache:
-                    try:
-                        sp_fp = fc.get_footprint_polygon(sp)
-                    except Exception:
-                        sp_fp = None
-                    centroid_cache[sp.GlobalId] = sp_fp.centroid if sp_fp is not None and not sp_fp.is_empty else None
-            for j in range(i + 1, len(space_list)):
-                c1 = centroid_cache.get(space_list[i].GlobalId)
-                c2 = centroid_cache.get(space_list[j].GlobalId)
-                if c1 is None or c2 is None:
-                    continue
-                line = LineString([(c1.x, c1.y), (c2.x, c2.y)])
-                if line.intersects(wall_fp):
-                    crossed = True
-                    break
-            if crossed:
-                break
-        result[gid] = crossed
-    return result
-
-
 def _determine_wall_classification(ifc_file):
     """벽 GlobalId -> ('내벽'/'외벽'/'외벽(추정)'/'내벽(추정-관계기반)'/'판정불가', 판정근거) 딕셔너리.
     1차: Pset_WallCommon.IsExternal.
@@ -713,7 +640,6 @@ def _determine_wall_classification(ifc_file):
         확인. 2차보다 근거가 약해 '추정-관계기반'으로 명확히 구분 표시한다."""
     both_sides = _wall_both_sides_space_check(ifc_file)
     distinct_space_count = _wall_distinct_space_count(ifc_file)
-    crossing_check = _wall_centroid_crossing_check(ifc_file, distinct_space_count)
     result = {}
     for w in ifc_file.by_type('IfcWall'):
         gid = w.GlobalId
@@ -728,30 +654,12 @@ def _determine_wall_classification(ifc_file):
             if both_sides[gid]:
                 result[gid] = ('내벽', '2차: RelSpaceBoundary 양면 Space 접촉 확인')
             else:
-                result[gid] = ('외벽(추정)', '2차: 한쪽 면만 Space 경계 접촉 → 외벽으로 추정(반대면 Space 경계 없음)')
+                result[gid] = ('외벽(추정)', '2차: 한쪽 면만 Space 접촉 → 외벽으로 추정(반대면 Space 경계 없음)')
         elif distinct_space_count.get(gid, 0) >= 2:
             n = distinct_space_count[gid]
-            if crossing_check.get(gid) is True:
-                # 개선(사용자 제안): 연결된 Space들의 중심점을 이은 선분이 실제로 이 벽과
-                # 교차하는 쌍이 있음 -> 벽을 사이에 두고 마주본다는 물리적 근거가 있으므로
-                # 내벽으로 추정한다(기존 3차보다 근거가 보강된 상태).
-                result[gid] = ('내벽(추정-관계기반)',
-                               f'3차: ConnectionGeometry 없음, 서로 다른 Space {n}개와 연결 + '
-                               f'Space 중심점 연결선이 벽과 교차 확인(마주보는 배치로 추정)')
-            elif crossing_check.get(gid) is False:
-                # 교차하는 쌍이 하나도 없음 -> 여러 Space가 벽의 같은 면에 나란히(일렬로)
-                # 붙어있을 뿐, 마주보고 있다는 근거가 없다. 이 경우 '내벽'으로 판정하면
-                # 안 된다는 게 사용자 지적 사항 - 근거 부족으로 판정불가 처리한다.
-                result[gid] = ('판정불가',
-                               f'3차: 서로 다른 Space {n}개와 연결되어 있으나, 중심점 연결선이 '
-                               f'벽과 교차하지 않음(벽의 같은 면에 나란히 접한 배치로 추정 - '
-                               f'내벽 근거로 보기 부족)')
-            else:
-                # 교차검증 자체가 불가능했던 경우(공간 지오메트리 계산 실패 등) - 기존처럼
-                # 관계 개수만으로 추정하되, 검증을 못 했다는 사실 자체를 근거에 명시한다.
-                result[gid] = ('내벽(추정-관계기반)',
-                               f'3차: ConnectionGeometry 없음, RelSpaceBoundary 관계상 서로 다른 Space {n}개와 '
-                               f'연결됨(중심점 교차검증은 지오메트리 계산 실패로 수행 못함 - 추정치임)')
+            result[gid] = ('내벽(추정-관계기반)',
+                           f'3차: ConnectionGeometry 없음, RelSpaceBoundary 관계상 서로 다른 Space {n}개와 '
+                           f'연결됨(지오메트리 미확인 - 같은 면이 여러 방과 연속 접한 경우일 수도 있어 추정치임)')
         else:
             result[gid] = ('판정불가', '1차/2차/3차 모두 근거 데이터 없음')
     return result
