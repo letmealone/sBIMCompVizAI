@@ -15,11 +15,12 @@ import ifcopenshell.geom as geom
 from shapely.geometry import Polygon, Point, box, MultiPolygon
 from shapely.ops import unary_union
 
-import ifc_to_excel as ite  
+import ifc_to_excel as ite  # 내외벽 판정(_determine_wall_classification), 면적계산(_area_columns) 등 재사용
 
 _SETTINGS = geom.settings()
 _SETTINGS.set('use-world-coords', True)
 
+# 평면도에 그릴 대상 클래스. Space는 클릭 가능(색상 채움), 나머지는 참고용 윤곽선만 표시.
 PLAN_STRUCTURAL_CLASSES = (
     'IfcWall', 'IfcWallStandardCase', 'IfcColumn', 'IfcBeam',
     'IfcSlab', 'IfcCurtainWall', 'IfcDoor', 'IfcWindow',
@@ -28,7 +29,12 @@ PLAN_STRUCTURAL_CLASSES = (
 )
 
 
+# ===================================================================
+# 1. IFC 로딩 및 층 매핑
+# ===================================================================
+
 def load_ifc(path):
+    """IFC 파일을 열고 앱에서 바로 쓸 수 있는 형태로 구조화."""
     ifc_file = ifcopenshell.open(path)
 
     storeys = []
@@ -98,6 +104,10 @@ def match_storeys(storeys_a, storeys_b, gap_cost=1000.0):
     return mapping, offset
 
 
+# ===================================================================
+# 1b. 공간(Space) 자동 매핑 (면적 + centroid 좌표 오차 기준)
+# ===================================================================
+
 def _offset_candidates(spaces_a, spaces_b, area_thresh):
     candidates = []
     for a in spaces_a:
@@ -159,6 +169,10 @@ def match_spaces(spaces_a, spaces_b, area_thresh=2.0, centroid_thresh=1.0):
 
     return a_to_b, b_to_a, offset, match_info
 
+
+# ===================================================================
+# 2. 지오메트리 (실제 footprint 폴리곤 추출)
+# ===================================================================
 
 def get_footprint_polygon(ent, tol=0.05):
     try:
@@ -231,6 +245,10 @@ def _polygon_xy_lists(poly):
     return xs, ys
 
 
+# ===================================================================
+# 3. 층별 요소 수집
+# ===================================================================
+
 def get_elements_for_storey(storey_entity, classes=None, max_decompose_depth=3):
     storey_ifc = storey_entity['entity'] if isinstance(storey_entity, dict) else storey_entity
     elements = []
@@ -243,15 +261,13 @@ def get_elements_for_storey(storey_entity, classes=None, max_decompose_depth=3):
         if classes is None or el.is_a() in classes:
             elements.append(el)
 
-    def _collect_children(el, depth, is_curtain_wall=False):
+    def _collect_children(el, depth):
         if depth >= max_decompose_depth:
             return
         for rel in (getattr(el, 'IsDecomposedBy', None) or []):
             for child in rel.RelatedObjects:
-                # 커튼월 내부에 포함된 하위 부품은 독립 개체로 추가하지 않음 (중복 방지)
-                if not is_curtain_wall:
-                    _add(child)
-                _collect_children(child, depth + 1, is_curtain_wall or el.is_a('IfcCurtainWall'))
+                _add(child)
+                _collect_children(child, depth + 1)
 
     top_level = []
     for rel in (storey_ifc.ContainsElements or []):
@@ -261,7 +277,7 @@ def get_elements_for_storey(storey_entity, classes=None, max_decompose_depth=3):
 
     for el in top_level:
         _add(el)
-        _collect_children(el, 0, el.is_a('IfcCurtainWall'))
+        _collect_children(el, 0)
 
     return elements
 
@@ -334,6 +350,10 @@ def build_storey_plan_data(storey_entity, tol=0.05, wall_classification=None, if
     return {'spaces': spaces, 'structural': structural}
 
 
+# ===================================================================
+# 4. 클릭된 Space의 상세 정보
+# ===================================================================
+
 EQUIPMENT_CLASSES = ('IfcLightFixture', 'IfcSensor', 'IfcFireSuppressionTerminal', 'IfcAlarm')
 
 
@@ -393,6 +413,7 @@ def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, 
 _equipment_index_cache = {}
 
 def _get_equipment_index(ifc_file):
+    """파일 내 모든 설비 배치 관계를 한 번만 순회하여 인덱싱(메모리 누수 해결 핵심)"""
     key = id(ifc_file)
     if key not in _equipment_index_cache:
         index = defaultdict(list)
@@ -406,6 +427,8 @@ def _get_equipment_index(ifc_file):
 
 
 def get_space_contained_equipment(ifc_file, space_entity, classes=EQUIPMENT_CLASSES):
+    """해당 Space '안에' 배치된 설비(조명/센서/소방장치 등) 목록.
+    미리 캐시된 인덱스를 사용하므로 반복 조회 시 메모리 부하가 없다."""
     index = _get_equipment_index(ifc_file)
     equipment = []
     for el in index.get(space_entity.GlobalId, []):
@@ -569,6 +592,7 @@ def _relspaceboundary_precise_areas(ifc_file, member_entity, own_side_area_m2, t
     for b in boundaries:
         per_space[b['space_guid']] += b['area_m2']
     return dict(per_space)
+
 
 
 def _apportioned_area(ifc_file, member_entity, target_space_entity, own_side_area_m2, space_footprint,
@@ -783,7 +807,7 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
 
     proximity_buffer_m = 0.5  
     if space_footprint is not None:
-        trim_region = space_space_footprint = space_footprint.buffer(proximity_buffer_m) if space_footprint else None
+        trim_region = space_footprint.buffer(proximity_buffer_m)
         trimmed = []
         for wp in world_polys:
             t = wp.intersection(trim_region)
