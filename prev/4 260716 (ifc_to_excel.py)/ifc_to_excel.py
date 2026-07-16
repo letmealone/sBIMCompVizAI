@@ -61,7 +61,8 @@ CATEGORY_LABELS = {
 CORE_ATTRS = ['GlobalId', 'Name', 'Description', 'ObjectType', 'Tag', 'PredefinedType', 'LongName']
 
 EXCLUDE_FROM_WIDE = {'IfcAnnotation'}
-MAX_ROWS_LONG = 300_000  
+MAX_ROWS_LONG = 300_000
+
 
 def _safe_attr(ent, name):
     try:
@@ -367,6 +368,7 @@ def _get_pset_area_fallback(flat_props):
 
 SYSTEM_ASSEMBLY_CLASSES = {'IfcDoor', 'IfcWindow', 'IfcCurtainWall'}
 
+
 def _get_system_bounding_face_area(ent):
     x, y, z, src = _get_local_dimensions(ent)
     dims = [d for d in (x, y, z) if d is not None]
@@ -516,112 +518,134 @@ AREA_TARGET_CLASSES = {'IfcRoof', 'IfcCovering', 'IfcSlab', 'IfcDoor', 'IfcWindo
 
 
 # ===================================================================
-# 3-1b. 벽 내/외벽 판정 및 검증 로직 개선 (선 분할 후 판정 방식)
+# 3-1b. 벽 내/외벽 판정 및 검증 로직 개선
 # ===================================================================
 
-def _determine_wall_classification(ifc_file):
-    """
-    [수정사항] 선(先) 분할(Segmentation), 후(後) 판정 로직 적용.
-    기존에는 벽 전체(IfcWall) 단위로 판정하여 L자 꺾인 벽이 내/외벽 역할을 동시에 
-    수행할 때 모순이 발생했음. 이를 해결하기 위해 공간(Space) 단위로 벽체를 가상으로 
-    조각(Segment) 낸 뒤, 각 조각이 다른 공간과 교차하는지를 개별 판정함.
-    
-    반환 형태: 
-    {
-      (Wall_GlobalId, Space_GlobalId): ('내벽'|'외벽'|'판정불가', '근거'),
-      Wall_GlobalId: ('혼합(내/외벽 복합)'|'내벽'|'외벽', '요약 근거') # 엑셀 및 구버전 호환용
-    }
-    """
-    result = {}
-    
-    try:
-        import floorplan_core as fc
-    except ImportError:
-        fc = None
+def _wall_both_sides_space_check(ifc_file):
+    import ifcopenshell.util.placement as plc
 
-    if not fc:
+    wall_normals = {}
+    for r in ifc_file.by_type('IfcRelSpaceBoundary'):
+        elem = r.RelatedBuildingElement
+        if elem is None or not elem.is_a('IfcWall'):
+            continue
+        space = r.RelatingSpace
+        cg = r.ConnectionGeometry
+        if space is None or cg is None:
+            continue
+        surf = cg.SurfaceOnRelatingElement
+        if surf is None or not surf.is_a('IfcCurveBoundedPlane'):
+            continue
+        plane = surf.BasisSurface
+        try:
+            space_m = plc.get_local_placement(space.ObjectPlacement)
+            plane_m = plc.get_axis2placement(plane.Position)
+        except Exception:
+            continue
+        world_m = space_m @ plane_m
+        normal = world_m[:3, 2]
+        nrm = np.linalg.norm(normal)
+        if nrm == 0:
+            continue
+        wall_normals.setdefault(elem.GlobalId, []).append(normal / nrm)
+
+    result = {}
+    for gid, normals in wall_normals.items():
+        ref = normals[0]
+        has_same = any(np.dot(n, ref) > 0.5 for n in normals)
+        has_opp = any(np.dot(n, ref) < -0.5 for n in normals)
+        result[gid] = has_same and has_opp
+    return result
+
+
+def _wall_distinct_space_count(ifc_file):
+    counts = defaultdict(set)
+    for r in ifc_file.by_type('IfcRelSpaceBoundary'):
+        elem = r.RelatedBuildingElement
+        if elem is None or not elem.is_a('IfcWall') or r.RelatingSpace is None:
+            continue
+        counts[elem.GlobalId].add(r.RelatingSpace.GlobalId)
+    return {gid: len(spaces) for gid, spaces in counts.items()}
+
+
+def _check_spaces_on_opposite_sides(ifc_file, distinct_space_count):
+    """
+    ConnectionGeometry가 누락된 경우, 부재에 연결된 Space들이 실제로
+    부재의 양쪽 면에 나뉘어 배치되어 있는지(내부), 아니면 모두 한쪽 면에만
+    나란히 배치되어 있는지(외부)를 로컬 좌표계 편측 판정으로 검증한다.
+    """
+    candidates = {gid for gid, n in distinct_space_count.items() if n >= 2}
+    if not candidates:
         return {}
 
-    # 1. 공간별 바닥 폴리곤(Footprint) 캐싱
-    space_fps = {}
-    storey_spaces = defaultdict(list)
-    for sp in ifc_file.by_type('IfcSpace'):
-        fp = fc.get_footprint_polygon(sp)
-        if fp and not fp.is_empty:
-            space_fps[sp.GlobalId] = fp
-            st = _get_storey(sp)
-            if st:
-                storey_spaces[st.GlobalId].append((sp.GlobalId, fp))
+    try:
+        import floorplan_core as fc
+        import ifcopenshell.util.placement as plc
+        import numpy as np
+    except ImportError:
+        return {}
 
-    # 2. 벽-공간 관계 매핑
-    wall_space_map = defaultdict(list)
+    wall_spaces = defaultdict(list)
+    wall_lookup = {}
     for r in ifc_file.by_type('IfcRelSpaceBoundary'):
-        w = r.RelatedBuildingElement
-        s = r.RelatingSpace
-        if w and w.is_a('IfcWall') and s:
-            wall_space_map[w.GlobalId].append(s)
+        elem = r.RelatedBuildingElement
+        if elem is None or elem.GlobalId not in candidates or r.RelatingSpace is None:
+            continue
+        wall_spaces[elem.GlobalId].append(r.RelatingSpace)
+        wall_lookup[elem.GlobalId] = elem
 
-    # 3. 조각(Segment) 단위 교차 검사
-    for w_guid, spaces in wall_space_map.items():
-        w_ent = ifc_file.by_id(w_guid)
-        w_fp = fc.get_footprint_polygon(w_ent)
-        
-        if not w_fp or w_fp.is_empty:
-            for s in spaces:
-                result[(w_guid, s.GlobalId)] = ('판정불가', '벽체 지오메트리 추출 실패')
+    result = {}
+    for gid, spaces in wall_spaces.items():
+        wall = wall_lookup[gid]
+        try:
+            member_m = plc.get_local_placement(wall.ObjectPlacement)
+            member_m_inv = np.linalg.inv(member_m)
+        except Exception:
             continue
 
-        for s in spaces:
-            s_fp = space_fps.get(s.GlobalId)
-            if not s_fp:
-                result[(w_guid, s.GlobalId)] = ('판정불가', '공간 지오메트리 추출 실패')
-                continue
-            
-            # [핵심 로직] 공간 영역에 맞게 벽체를 분할(Segmentation)하여 해당 공간과 맞닿은 조각 획득
-            seg_result = fc.get_space_wall_segment_polygon(ifc_file, w_ent, s, w_fp)
-            if not seg_result or not seg_result[0]:
-                result[(w_guid, s.GlobalId)] = ('외벽(추정)', '벽체 분할(Segmentation) 실패로 기본 외벽 간주')
-                continue
-            
-            seg_poly, _method = seg_result
-            
-            # 분할된 벽체 조각이 반대편에 있는 다른 공간과 닿아있는지 확인 (두께나 모델링 이격 극복을 위해 10cm 버퍼)
-            buffered_seg = seg_poly.buffer(0.1)
-            
-            st = _get_storey(s)
-            other_spaces = storey_spaces.get(st.GlobalId, []) if st else []
-            
-            is_internal = False
-            for other_guid, other_fp in other_spaces:
-                if other_guid == s.GlobalId:
-                    continue
-                
-                # 다른 공간과 교차하는 영역이 유의미한지 검사
-                if buffered_seg.intersects(other_fp):
-                    inter = buffered_seg.intersection(other_fp)
-                    if inter.area > 0.01:  # 단순 선 접촉이 아닌 실제 면적 공유
-                        is_internal = True
-                        break
-                        
-            if is_internal:
-                result[(w_guid, s.GlobalId)] = ('내벽', '조각 단위 교차 검사: 반대편에 다른 공간 존재함')
-            else:
-                result[(w_guid, s.GlobalId)] = ('외벽', '조각 단위 교차 검사: 반대편이 외부와 접함')
+        axis_segments = fc._member_axis_segments(wall)
+        sides = set()
+        for sp in spaces:
+            side = fc._space_side_of_member(sp, member_m_inv, axis_segments)
+            if side:
+                sides.add(side)
 
-    # 4. 엑셀 출력 및 하위 호환성을 위해 단일 GlobalId에 대한 대표 속성(혼합 포함)도 병기
-    for w_guid, spaces in wall_space_map.items():
-        internal_cnt = sum(1 for s in spaces if result.get((w_guid, s.GlobalId), ('', ''))[0] == '내벽')
-        external_cnt = sum(1 for s in spaces if result.get((w_guid, s.GlobalId), ('', ''))[0] in ('외벽', '외벽(추정)'))
-        
-        if internal_cnt > 0 and external_cnt > 0:
-            result[w_guid] = ('혼합(내/외벽 복합)', '분할 조각 중 내벽과 외벽 속성 혼재')
-        elif internal_cnt > 0:
-            result[w_guid] = ('내벽', '모든 분할 조각이 내벽으로 판정됨')
-        elif external_cnt > 0:
-            result[w_guid] = ('외벽', '모든 분할 조각이 외벽으로 판정됨')
+        if '+' in sides and '-' in sides:
+            result[gid] = True
+        elif len(sides) == 1:
+            result[gid] = False
+    return result
+
+
+def _determine_wall_classification(ifc_file):
+    both_sides = _wall_both_sides_space_check(ifc_file)
+    distinct_space_count = _wall_distinct_space_count(ifc_file)
+    side_check = _check_spaces_on_opposite_sides(ifc_file, distinct_space_count)
+    
+    result = {}
+    for w in ifc_file.by_type('IfcWall'):
+        gid = w.GlobalId
+        is_ext = None
+        if is_ext is True:
+            result[gid] = ('외벽', '1차: Pset_WallCommon.IsExternal=True')
+        elif is_ext is False:
+            result[gid] = ('내벽', '1차: Pset_WallCommon.IsExternal=False')
+        elif gid in both_sides:
+            if both_sides[gid]:
+                result[gid] = ('내벽', '2차: RelSpaceBoundary 양면 Space 접촉 확인')
+            else:
+                result[gid] = ('외벽(추정)', '2차: 한쪽 면만 Space 접촉 → 외벽으로 추정(반대면 Space 경계 없음)')
+        elif distinct_space_count.get(gid, 0) >= 2:
+            n = distinct_space_count[gid]
+            has_opp = side_check.get(gid)
+            if has_opp is True:
+                result[gid] = ('내벽(추정-관계기반)', f'3차: 서로 다른 Space {n}개가 양쪽 면에 마주보며 접함')
+            elif has_opp is False:
+                result[gid] = ('외벽(추정)', f'3차: 서로 다른 Space {n}개가 모두 한쪽 면에만 나란히 접함 → 외벽 추정')
+            else:
+                result[gid] = ('내벽(추정-관계기반)', f'3차: 서로 다른 Space {n}개와 연결됨(면 방향 검증 실패)')
         else:
-            result[w_guid] = ('판정불가', '근거 없음')
-            
+            result[gid] = ('판정불가', '1차/2차/3차 모두 근거 데이터 없음')
     return result
 
 
@@ -630,7 +654,7 @@ def _determine_wall_classification(ifc_file):
 # ===================================================================
 
 ELEMENT_CLASSIFICATION_TARGET_CLASSES = (
-    'IfcSlab', 'IfcRoof', 'IfcCovering',
+    'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcRoof', 'IfcCovering',
     'IfcColumn', 'IfcBeam', 'IfcMember', 'IfcCurtainWall', 'IfcDoor', 'IfcWindow',
     'IfcRailing', 'IfcStair', 'IfcStairFlight', 'IfcRamp', 'IfcRampFlight',
 )
@@ -668,8 +692,8 @@ def _element_both_sides_space_check(ifc_file, target_classes=None):
     result = {}
     for gid, ns in normals.items():
         ref = ns[0]
-        has_same = any(np.dot(n, ref) > 0.5 for n in normals)
-        has_opp = any(np.dot(n, ref) < -0.5 for n in normals)
+        has_same = any(np.dot(n, ref) > 0.5 for n in ns)
+        has_opp = any(np.dot(n, ref) < -0.5 for n in ns)
         result[gid] = has_same and has_opp
     return result
 
@@ -689,6 +713,7 @@ def _element_distinct_space_count(ifc_file, target_classes=None):
 def _determine_element_classification(ifc_file, target_classes=ELEMENT_CLASSIFICATION_TARGET_CLASSES):
     both_sides = _element_both_sides_space_check(ifc_file, target_classes)
     distinct_count = _element_distinct_space_count(ifc_file, target_classes)
+    side_check = _check_spaces_on_opposite_sides(ifc_file, distinct_count)
 
     result = {}
     for cls in target_classes:
@@ -696,15 +721,25 @@ def _determine_element_classification(ifc_file, target_classes=ELEMENT_CLASSIFIC
             gid = ent.GlobalId
             if gid in result:
                 continue 
-            
-            if gid in both_sides:
+            is_ext = None
+            if is_ext is True:
+                result[gid] = ('외부', '1차: Pset_*Common.IsExternal=True')
+            elif is_ext is False:
+                result[gid] = ('내부', '1차: Pset_*Common.IsExternal=False')
+            elif gid in both_sides:
                 if both_sides[gid]:
                     result[gid] = ('내부', '2차: RelSpaceBoundary 양면 Space 접촉 확인')
                 else:
                     result[gid] = ('외부(추정)', '2차: 한쪽 면만 Space 접촉 → 외부로 추정')
             elif distinct_count.get(gid, 0) >= 2:
                 n = distinct_count[gid]
-                result[gid] = ('내부(추정-관계기반)', f'3차: 서로 다른 Space {n}개와 연결')
+                has_opp = side_check.get(gid)
+                if has_opp is True:
+                    result[gid] = ('내부(추정-관계기반)', f'3차: 서로 다른 Space {n}개가 양쪽 면에 마주보며 접함')
+                elif has_opp is False:
+                    result[gid] = ('외부(추정)', f'3차: 서로 다른 Space {n}개가 모두 한쪽 면에만 나란히 접함 → 외부 추정')
+                else:
+                    result[gid] = ('내부(추정-관계기반)', f'3차: 서로 다른 Space {n}개와 연결(면 방향 검증 실패)')
             else:
                 result[gid] = ('판정불가', '1차/2차/3차 모두 근거 데이터 없음')
     return result
@@ -724,14 +759,8 @@ def _build_space_element_matrix(ifc_file, wall_classification=None):
         if sp is None or elem is None:
             continue
         storey = _storey_via_decomposition(sp) or _get_storey(sp)
-        
-        # [수정] 엑셀 내보내기 시 (Wall_GUID, Space_GUID) 조합의 세부 판정 결과 기록
-        if elem.is_a('IfcWall'):
-            cls_result, cls_reason = wall_classification.get((elem.GlobalId, sp.GlobalId), 
-                                     wall_classification.get(elem.GlobalId, (None, None)))
-        else:
-            cls_result, cls_reason = None, None
-            
+        cls_result, cls_reason = (wall_classification.get(elem.GlobalId, (None, None))
+                                   if elem.is_a('IfcWall') else (None, None))
         rows.append({
             '층(Storey)': storey.Name if storey else None,
             '공간(Space)_Name': sp.Name,
@@ -741,7 +770,7 @@ def _build_space_element_matrix(ifc_file, wall_classification=None):
             '부재_GUID': elem.GlobalId,
             'PhysicalOrVirtual': rel.PhysicalOrVirtualBoundary,
             'InternalOrExternal': rel.InternalOrExternalBoundary,
-            '벽_내외벽_판정(조각단위)': cls_result,
+            '벽_내외벽_판정': cls_result,
             '벽_판정근거': cls_reason,
             'RelSpaceBoundary_GUID': rel.GlobalId,
         })
@@ -757,18 +786,17 @@ def _build_wall_classification_sheet(ifc_file, wall_classification=None):
     rows = []
     for w in ifc_file.by_type('IfcWall'):
         storey = _get_storey(w)
-        # [수정] 혼합 여부가 저장된 단일 GlobalId 키를 불러와 객체(Wall) 기준의 대푯값 기록
         result, reason = wall_classification.get(w.GlobalId, ('판정불가', '근거 데이터 없음'))
         rows.append({
             '층(Storey)': storey.Name if storey else None,
             'Name': _safe_attr(w, 'Name'),
             'GlobalId': w.GlobalId,
-            '내외벽_판정(객체단위)': result,
+            '내외벽_판정': result,
             '판정근거': reason,
         })
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values(['층(Storey)', '내외벽_판정(객체단위)', 'Name']).reset_index(drop=True)
+        df = df.sort_values(['층(Storey)', '내외벽_판정', 'Name']).reset_index(drop=True)
     return df
 
 
@@ -890,7 +918,6 @@ def _build_relspaceboundary_duplication_report(ifc_file):
     elem_class = {}
     for r in ifc_file.by_type('IfcRelSpaceBoundary'):
         elem = r.RelatedBuildingElement
-        sp = r.RelatingSpace
         if elem is None or sp is None:
             continue
         pair_count[(sp.GlobalId, elem.GlobalId)] += 1
@@ -1426,7 +1453,7 @@ def extract_ifc_to_excel(ifc_path: str, output_path: str = None, include_long: b
 
     if naming_diagnosis:
         if not nvidia_api_key:
-            pass
+            print("[경고] naming_diagnosis=True이지만 nvidia_api_key가 없어 IFC4 명명규칙 진단을 건너뜁니다.", flush=True)
         else:
             llm_call = make_nim_llm_call(api_key=nvidia_api_key, model=nvidia_model)
             df_diag = run_ifc4_naming_diagnosis(
