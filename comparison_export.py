@@ -151,31 +151,36 @@ def _floor_class_summary(ifc_file, storey_dict, walls_by_storey=None):
     층 하나에 속한 부재 전체를 그대로 합산).
     면적 산정은 공간별 집계(build_space_structural_breakdown)와 동일한 우선순위를 따르되
     안분(apportion)은 하지 않는다(층 전체 기준이라 여러 공간에 걸치는지 여부가 무관함):
-      - IfcWall/IfcWallStandardCase: 좌표 기반 bounding치수(폭x높이) 전체값.
+      - IfcWall/IfcWallStandardCase: 좌표 기반 bounding치수(폭x높이) 조립체(재료 레이어
+        묶음) 단위 집계 - 아래 [수정사항 2] 참고.
       - _STRUCTURAL_AREA_MEANINGFUL_CLASSES(Slab/Roof/Covering/Door/Window/CurtainWall):
         ite._area_columns() 전체값(Qto 속성은 신뢰도 문제로 사용하지 않고 좌표 직접계산을
         최우선으로 사용함).
       - 그 외 클래스: 개수만.
-    [수정사항] 기존에는 `elements`를 ELEMENT_CLASSIFICATION_TARGET_CLASSES로만 구했는데
+    [수정사항 1] 기존에는 `elements`를 ELEMENT_CLASSIFICATION_TARGET_CLASSES로만 구했는데
     이 집합에 IfcWall이 빠져있어, 벽에 대한 집계 분기가 있었음에도 실제로는 단 한 번도
     실행되지 못하고 시트에서 벽이 통째로 누락되고 있었다(데드 코드). 벽은 별도로
     수집하되, 벽의 IFC 컨테이너 소속 층과 실제 관계된 공간의 소속 층이 어긋나는 원본
     데이터 사례가 있어(실측 확인) 이를 보정하는 _wall_footprints_by_storey()의 결과를
     재사용한다. 이 결과는 파일 하나당 한 번만 계산하는 게 좋으므로(벽 footprint
     계산은 비용이 있음) 호출부에서 미리 계산해 넘기는 걸 권장하며, 넘기지 않으면
-    이 함수가 그때그때 계산한다."""
+    이 함수가 그때그때 계산한다.
+    [수정사항 2] 벽을 개별 엔티티 그대로 다 세면, 마감재(석고보드 등)가 구조체(콘크리트/
+    조적)와 별도 엔티티로 모델링된 경우 같은 벽면 하나가 개수도 면적도 레이어 수만큼
+    중복 집계되는 문제가 실측으로 확인됨(공간별 집계에서 먼저 발견한 것과 동일한
+    문제가 공간 매칭과 무관한 층단위 집계에도 그대로 있었음). 마감재는 특정 부재(구조체)
+    의 부속품으로 보고, compute_wall_assembly_summary()로 조립체 단위(레이어 묶음당
+    1개)로 집계한다."""
     elements = fc.get_elements_for_storey(storey_dict, classes=set(ite.ELEMENT_CLASSIFICATION_TARGET_CLASSES))
     summary = defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False})
 
     if walls_by_storey is None:
         walls_by_storey = ite._wall_footprints_by_storey(ifc_file, fc)
-    for w, _fp in walls_by_storey.get(storey_dict['entity'].GlobalId, []):
-        area_val, _src = fc._get_wall_side_area_m2(w)
-        cls = w.is_a()
-        summary[cls]['count'] += 1
-        if area_val is not None:
-            summary[cls]['area'] += area_val
-            summary[cls]['_has_area'] = True
+    wall_count, wall_area = fc.compute_wall_assembly_summary(ifc_file, storey_dict['entity'], walls_by_storey)
+    if wall_count > 0:
+        summary['IfcWall']['count'] = wall_count
+        summary['IfcWall']['area'] = wall_area
+        summary['IfcWall']['_has_area'] = True
 
     for e in elements:
         cls = e.is_a()

@@ -1203,6 +1203,36 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
     }
 
 
+def compute_wall_assembly_summary(ifc_file, storey_entity, walls_by_storey=None):
+    """[신규] 공간 매칭과 무관하게, 층 전체 기준으로 벽을 조립체(같은 벽면을 이루는
+    재료 레이어 묶음) 단위로 집계한 (개수, 총면적)을 반환한다. 마감재(석고보드 등)는
+    구조체(콘크리트/조적)의 부속품으로 보고, 조립체 하나당 한 번만 센다 - 개별 벽
+    엔티티를 그대로 다 세면 마감+구조체가 각각 별도 항목으로 잡혀 개수도, 면적도
+    실제보다 부풀려지는 문제(공간별 집계에서 확인된 것과 동일한 문제)가 층단위
+    집계에도 그대로 있었다."""
+    import sys
+    _self = sys.modules[__name__]
+    if walls_by_storey is None:
+        walls_by_storey = ite._wall_footprints_by_storey(ifc_file, _self)
+    walls_here = walls_by_storey.get(storey_entity.GlobalId, [])
+    wall_ent_by_guid = {w.GlobalId: w for w, _fp in walls_here}
+    assemblies = ite._group_wall_assemblies(walls_here, _self)
+
+    count = 0
+    total_area = 0.0
+    for asm in assemblies:
+        members = [(g, wall_ent_by_guid[g]) for g in asm['guids'] if g in wall_ent_by_guid]
+        if not members:
+            continue
+        own_areas = {g: (_get_wall_side_area_m2(w)[0] or 0.0) for g, w in members}
+        area = _compute_assembly_own_area(members, own_areas, asm['union'])
+        if area is None:
+            continue
+        count += 1
+        total_area += area
+    return count, total_area
+
+
 def compute_wall_area_attribution(ifc_file, storey_entity):
     """벽체의 층단위 총면적을 '공간과 접해 분할된 부분(matched)'과 '공간과 무관해
     잘리지 않은 잔여 부분(residual)'으로 나눈다.
