@@ -517,18 +517,24 @@ def _area_columns(ent, flat_props, length_unit_scale=0.001):
         if area_m2 is not None:
             return {'면적(㎡)': round(area_m2, 4), '면적산출방식': method}
 
-    # 2순위: 커튼월 - 하위부품 union 방식
-    if cls == 'IfcCurtainWall':
-        area_m2, method = _get_union_footprint_area_m2(ent)
-        if area_m2 is not None:
-            return {'면적(㎡)': round(area_m2, 4), '면적산출방식': method}
-
-    # 3순위: 문/창 등 - 전체 bounding치수(폭x높이) 기반
+    # 2순위: 문/창/커튼월 - 전체 bounding치수(폭x높이) 기반
+    # [수정사항] 커튼월은 수직 파사드 부재인데, 예전에는 여기 도달하기 전에 아래
+    # '하위부품 footprint 합집합'(평면투영) 방식을 먼저 시도했음. 평면투영은 슬래브처럼
+    # 수평인 부재에는 맞지만, 커튼월처럼 수직인 조립체에 쓰면 멀리언·프레임의 바닥
+    # 단면(길이x두께 수준의 얇은 조각)만 잡혀 실제 유리 파사드 면적(폭x높이)보다
+    # 수십~수백 배 작게 나오는 문제가 실측으로 확인됨(예: 실제로는 수~수십㎡인 커튼월이
+    # 0.09~0.75㎡로 계산됨). 문/창과 동일하게 bounding치수(폭x높이) 방식을 먼저 시도하고,
+    # 그게 실패할 때만(예: 매우 예외적인 수평 채광창 형태) 평면투영을 최후 폴백으로 쓴다.
     area, method = None, None
     if cls in SYSTEM_ASSEMBLY_CLASSES:
         area, method = _get_system_bounding_face_area(ent)
         if area is None:
             area, method = _get_assembly_bounding_face_area(ent)
+
+    if area is None and cls == 'IfcCurtainWall':
+        area_m2, method2 = _get_union_footprint_area_m2(ent)
+        if area_m2 is not None:
+            return {'면적(㎡)': round(area_m2, 4), '면적산출방식': method2 + '(최후 폴백-수평형태 추정)'}
 
     # 4순위: 최후 폴백 - 단일 body 기준 직접계산(다중조각 미대응, 위 방법들이 모두 실패한
     # 경우에만 도달)
