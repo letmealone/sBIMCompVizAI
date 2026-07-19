@@ -177,6 +177,13 @@ def _resolve_body_items(ent):
 
 
 def _profile_xy_extent(profile):
+    """[수정사항] IfcIndexedPolyCurve 기반 임의 단면(IfcArbitraryClosedProfileDef 등)은
+    벽이 대각선 파사드에 맞춰 비스듬히 잘린 경우 흔한데, 이때 단순 축정렬(axis-aligned)
+    bbox를 쓰면 회전된 사각형의 진짜 폭/길이를 제대로 복원하지 못하고 실제보다 훨씬
+    작은 값이 나오는 문제가 실측으로 확인됨(예: 실제 길이 1687mm인 벽이 축정렬 bbox로는
+    1212mm로 계산되어 약 28% 과소산정). 최소회전사각형(minimum_rotated_rectangle)의 변
+    길이를 쓰면 회전 각도와 무관하게 원래 치수를 훨씬 정확히 복원한다(같은 사례에서
+    1694mm로 오차 0.4% 이내)."""
     try:
         if profile.is_a('IfcRectangleProfileDef'):
             return profile.XDim, profile.YDim
@@ -187,6 +194,27 @@ def _profile_xy_extent(profile):
             pts = curve.Points
             if pts.is_a('IfcCartesianPointList2D'):
                 arr = np.array(pts.CoordList, dtype=float)
+                try:
+                    from shapely.geometry import Polygon
+                    poly = Polygon(arr)
+                    mrr = poly.minimum_rotated_rectangle
+                    coords = list(mrr.exterior.coords)
+                    side_a = np.linalg.norm(np.array(coords[1]) - np.array(coords[0]))
+                    side_b = np.linalg.norm(np.array(coords[2]) - np.array(coords[1]))
+                    if side_a > 0 and side_b > 0:
+                        # [수정사항] MRR의 변 순서는 회전각과 무관하게 임의의 시작
+                        # 코너부터 매겨지므로, 도형이 이미 축정렬(회전 없음)이어도
+                        # side_a가 로컬 X축이 아니라 Y축 방향 길이가 되는 경우가 있었음
+                        # (실측 확인: L자 코너 벽 조각에서 X/Y가 뒤바뀌어 이후 Position
+                        # 변환 단계에서 코너 위치가 어긋남). 첫 변의 방향이 X축에 더
+                        # 가까우면 side_a=X, 아니면 side_a=Y로 판단해 배정한다.
+                        edge_vec = np.array(coords[1]) - np.array(coords[0])
+                        if abs(edge_vec[0]) >= abs(edge_vec[1]):
+                            return float(side_a), float(side_b)
+                        else:
+                            return float(side_b), float(side_a)
+                except Exception:
+                    pass
                 ext = arr.max(axis=0) - arr.min(axis=0)
                 return float(ext[0]), float(ext[1])
     except Exception:

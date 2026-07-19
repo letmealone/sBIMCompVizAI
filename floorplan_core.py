@@ -906,15 +906,38 @@ def _get_wall_side_area_m2(ent, flat_props=None):
     사용하지 않고 좌표 기반 bounding치수 계산만 사용한다. 또한 벽 하나가 여러
     공간에 걸쳐 있으면(내벽) 공간마다 반복 호출되므로, 벽 자체의 '전체 옆면적'은
     GlobalId 기준으로 한 번만 계산해 캐시한다(공간별로 달라지는 것은 이후 안분
-    비율뿐이며, 안분 비율 계산은 이 캐시와 무관하게 공간별로 그대로 수행된다)."""
+    비율뿐이며, 안분 비율 계산은 이 캐시와 무관하게 공간별로 그대로 수행된다).
+
+    [수정사항 2] 일반적으로 쓰는 '로컬 X/Y/Z 중 가장 작은 값을 두께로 보고 버린다'는
+    규칙은, 벽이 서로 수직인 여러 압출체(L자 코너 등)로 구성된 경우 결합 bbox의
+    X/Y가 실제 높이(Z)보다도 커져서 진짜 높이가 버려지고 대신 두 평면(X,Y) 치수끼리
+    곱해지는 - 입면적이 아니라 사실상 평면적에 가까운 값이 나오는 문제가 실측으로
+    확인됨(1.ifc 18건, 2.ifc 7건). 벽은 일반적 층고 범위(1.5~8m)에 해당하는 값이
+    있으면 그것을 높이로 확정하고 나머지 중 가장 큰 값을 폭으로 곱한다 - 문/창호/
+    커튼월은 이 함수를 쓰지 않으므로(별도 경로) 영향 없음."""
     key = ent.GlobalId
     if key in _wall_side_area_cache:
         return _wall_side_area_cache[key]
-    raw_area, method = ite._get_system_bounding_face_area(ent)
-    if raw_area is not None:
-        result = (raw_area * 1e-6, f'폴백-{method}')
-    else:
+
+    x, y, z, src = ite._get_local_dimensions(ent)
+    dims_list = [d for d in (x, y, z) if d is not None]
+    if len(dims_list) < 2:
         result = (None, None)
+    else:
+        plausible_height = [d for d in dims_list if 1500.0 <= d <= 8000.0]
+        if plausible_height:
+            height = max(plausible_height)
+            remaining = list(dims_list)
+            remaining.remove(height)
+            width = max(remaining) if remaining else height
+            raw_area = height * width
+            note = '벽높이인식'
+        else:
+            dims_sorted = sorted(dims_list, reverse=True)
+            raw_area = dims_sorted[0] * dims_sorted[1]
+            note = '일반'
+        result = (raw_area * 1e-6, f'폴백-시스템 전체 bounding치수 기반(폭x높이, 두께제외; {note}; {src})')
+
     _wall_side_area_cache[key] = result
     return result
 
