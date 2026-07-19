@@ -666,8 +666,8 @@ def _element_both_sides_space_check(ifc_file, target_classes=None):
     result = {}
     for gid, ns in normals.items():
         ref = ns[0]
-        has_same = any(np.dot(n, ref) > 0.5 for n in normals)
-        has_opp = any(np.dot(n, ref) < -0.5 for n in normals)
+        has_same = any(np.dot(n, ref) > 0.5 for n in ns)
+        has_opp = any(np.dot(n, ref) < -0.5 for n in ns)
         result[gid] = has_same and has_opp
     return result
 
