@@ -152,9 +152,10 @@ def _floor_class_summary(ifc_file, storey_dict):
     RelSpaceBoundary 정밀계산도 필요 없음).
     면적 산정은 공간별 집계(build_space_structural_breakdown)와 동일한 우선순위를 따르되
     안분(apportion)은 하지 않는다(층 전체 기준이라 여러 공간에 걸치는지 여부가 무관함):
-      - IfcWall/IfcWallStandardCase: Qto_WallBaseQuantities.Gross_Side_Area 전체값.
+      - IfcWall/IfcWallStandardCase: 좌표 기반 bounding치수(폭x높이) 전체값.
       - _STRUCTURAL_AREA_MEANINGFUL_CLASSES(Slab/Roof/Covering/Door/Window/CurtainWall):
-        ite._area_columns() 전체값(이제 Qto 정식 수량값을 최우선으로 사용함).
+        ite._area_columns() 전체값(Qto 속성은 신뢰도 문제로 사용하지 않고 좌표 직접계산을
+        최우선으로 사용함).
       - 그 외 클래스: 개수만.
     반환: {클래스: {'count':int, 'area':float|None}}"""
     elements = fc.get_elements_for_storey(storey_dict, classes=set(ite.ELEMENT_CLASSIFICATION_TARGET_CLASSES))
@@ -163,8 +164,7 @@ def _floor_class_summary(ifc_file, storey_dict):
         cls = e.is_a()
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
-            flat = ite._flatten_psets(e)
-            area_val, _src = fc._get_wall_side_area_m2(e, flat_props=flat)
+            area_val, _src = fc._get_wall_side_area_m2(e)
         elif cls in fc._STRUCTURAL_AREA_MEANINGFUL_CLASSES:
             flat = ite._flatten_psets(e)
             cols = ite._area_columns(e, flat)
