@@ -568,44 +568,9 @@ AREA_TARGET_CLASSES = {'IfcRoof', 'IfcCovering', 'IfcSlab', 'IfcDoor', 'IfcWindo
 # 있다. 같은 층에서 서로 평행하고 근접(gap_tol 이내)하며 겹치는 벽들을 하나의
 # '조립체'로 묶어, 조립체 전체 기준으로 내/외부를 재판정한다.
 
-def _effective_wall_storey(ifc_file, wall, container_storey, fc, boundary_index=None):
-    """[수정사항] 벽의 IFC 컨테이너 소속 층과, 이 벽이 실제 RelSpaceBoundary로 접한
-    공간들의 소속 층이 다른 원본 데이터 사례가 실측으로 확인됨(벽 컨테이너는 2층인데
-    유일한 관계는 1층 공간을 가리킴 - 450㎡짜리 벽 하나가 통째로 엉뚱한 층에 잡히고
-    정작 소속 층에서는 누락되어 인접한 두 층의 층단위 집계가 동시에 틀어짐). 관계된
-    공간들의 소속 층 중 컨테이너 층과 일치하는 것이 하나라도 있으면 컨테이너 층을
-    그대로 신뢰하고, 하나도 없으면(완전히 어긋난 경우만) 관계된 공간들의 다수 층으로
-    보정한다."""
-    if boundary_index is None:
-        boundary_index = fc._get_boundary_index(ifc_file)
-    rels = boundary_index.get(wall.GlobalId, [])
-    space_storeys = []
-    for r in rels:
-        sp = r.RelatingSpace
-        if sp is None:
-            continue
-        st = _get_storey(sp)
-        if st is not None:
-            space_storeys.append(st)
-    if not space_storeys:
-        return container_storey
-
-    container_guid = container_storey.GlobalId if container_storey else None
-    if any(st.GlobalId == container_guid for st in space_storeys):
-        return container_storey
-
-    counts = Counter(st.GlobalId for st in space_storeys)
-    majority_guid, _ = counts.most_common(1)[0]
-    for st in space_storeys:
-        if st.GlobalId == majority_guid:
-            return st
-    return container_storey
-
-
 def _wall_footprints_by_storey(ifc_file, fc):
     by_storey = defaultdict(list)
     seen = set()
-    boundary_index = fc._get_boundary_index(ifc_file)
     walls = list(ifc_file.by_type('IfcWall'))
     for w in walls:
         if w.GlobalId in seen:
@@ -614,7 +579,6 @@ def _wall_footprints_by_storey(ifc_file, fc):
         st = _get_storey(w)
         if st is None:
             continue
-        st = _effective_wall_storey(ifc_file, w, st, fc, boundary_index)
         fp = fc.get_footprint_polygon(w)
         if fp is None or fp.is_empty:
             continue

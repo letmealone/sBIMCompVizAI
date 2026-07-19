@@ -375,27 +375,6 @@ def _get_storey_candidate_footprints(ifc_file, storey):
     return _storey_candidate_footprint_cache[key]
 
 
-_storey_wall_candidate_footprint_cache = {}
-
-
-def _get_storey_wall_candidate_footprints(ifc_file, storey):
-    """[수정사항] ELEMENT_CLASSIFICATION_TARGET_CLASSES에는 IfcWall이 빠져있어, 벽은
-    RelSpaceBoundary 관계가 있을 때만 공간에 연결되고 관계가 0건인 벽(예: 조립체 병합으로
-    승격은 됐지만 실제 관계는 없는 코어층)은 어떤 공간의 related 목록에도 절대 못
-    들어가는 문제가 실측으로 확인됨(공간별 합산에서 통째로 누락). 벽 전용 후보 목록을
-    별도로 캐싱해 지오메트리 폴백 대상에 포함한다."""
-    key = (id(ifc_file), storey.GlobalId)
-    if key not in _storey_wall_candidate_footprint_cache:
-        candidates = get_elements_for_storey(storey, classes={'IfcWall', 'IfcWallStandardCase'})
-        pairs = []
-        for el in candidates:
-            fp = get_footprint_polygon_cached(el)
-            if fp is not None and not fp.is_empty:
-                pairs.append((el, fp))
-        _storey_wall_candidate_footprint_cache[key] = pairs
-    return _storey_wall_candidate_footprint_cache[key]
-
-
 def precompute_storey_geometry(ifc_file, storeys, status_cb=None):
     total = len(storeys)
     for i, storey in enumerate(storeys, start=1):
@@ -417,12 +396,6 @@ def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, 
             space_fp = get_footprint_polygon(space_entity)
             if space_fp is not None and not space_fp.is_empty:
                 for el, el_fp in _get_storey_candidate_footprints(ifc_file, storey):
-                    if el.GlobalId in by_guid:
-                        continue
-                    if space_fp.distance(el_fp) <= adjacency_tol:
-                        by_guid[el.GlobalId] = el
-                # 벽 전용 폴백 (기존에는 벽이 이 지오메트리 폴백 대상에서 전부 빠져있었음)
-                for el, el_fp in _get_storey_wall_candidate_footprints(ifc_file, storey):
                     if el.GlobalId in by_guid:
                         continue
                     if space_fp.distance(el_fp) <= adjacency_tol:
@@ -946,14 +919,7 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
     for e in related:
         if not e.is_a('IfcWall'):
             continue
-        # [수정사항] 벽 전체(GlobalId) 라벨만 쓰면, '혼합(내/외벽 복합)'으로 판정된 벽이
-        # 접하는 모든 공간에서 일괄적으로 '외부(판정됨)'으로 집계되어(실제로는 일부
-        # 공간에서는 내벽인데도) 여러 공간에 걸쳐 면적이 중복 과다산정되는 문제가 실측으로
-        # 확인됨(예: 9개 공간과 접한 566㎡ 벽 하나가 9곳 전부에서 외벽으로 잡힘). 이 공간
-        # 전용 pair-level 라벨이 있으면 그것을 우선 사용하고, 없을 때만(관계 자체가 없던
-        # 벽 등) 벽 전체 라벨로 폴백한다.
-        result, _reason = wall_classification.get(
-            (e.GlobalId, space_entity.GlobalId), wall_classification.get(e.GlobalId, ('판정불가', '')))
+        result, _reason = wall_classification.get(e.GlobalId, ('판정불가', ''))
         simple, detail_label = _wall_display_category(result)
         wall_simple_counts[simple] += 1
         wall_detail_counts[detail_label] += 1
@@ -1017,14 +983,13 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         'wall_detail_counts': dict(wall_detail_counts),
         'area_by_class': area_by_class,
         'equipment_counts': dict(equipment_counts),
-        'highlight_map': _build_highlight_map(related, equipment, wall_classification,
-                                               space_guid=space_entity.GlobalId),
+        'highlight_map': _build_highlight_map(related, equipment, wall_classification),
         'wall_segment_polygons': wall_segment_polygons,
         'wall_segment_stats': wall_segment_stats,
     }
 
 
-def build_space_structural_breakdown(ifc_file, element_classification, wall_classification, space_entity):
+def build_space_structural_breakdown(ifc_file, element_classification, space_entity):
     related = get_space_related_elements(ifc_file, space_entity)
     space_footprint = get_footprint_polygon_cached(space_entity)
 
@@ -1033,15 +998,7 @@ def build_space_structural_breakdown(ifc_file, element_classification, wall_clas
 
     for e in related:
         cls = e.is_a()
-        # [수정사항 1] 벽은 element_classification(비-벽 부재 전용 분류)에 아예 없어 항상
-        # '판정불가'로 잡히던 별도 버그가 있었다 - 벽 전용 wall_classification을 사용한다.
-        # [수정사항 2] 벽 전체(GlobalId) 라벨만 쓰면 '혼합' 벽이 접하는 모든 공간에서
-        # 일괄 외부로 집계되는 문제가 있었다 - (벽,공간) pair-level 라벨을 우선 사용한다.
-        if cls in ('IfcWall', 'IfcWallStandardCase'):
-            label, _reason = wall_classification.get(
-                (e.GlobalId, space_entity.GlobalId), wall_classification.get(e.GlobalId, ('판정불가', '')))
-        else:
-            label, _reason = element_classification.get(e.GlobalId, ('판정불가', ''))
+        label, _reason = element_classification.get(e.GlobalId, ('판정불가', ''))
 
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
@@ -1075,17 +1032,11 @@ def build_space_structural_breakdown(ifc_file, element_classification, wall_clas
     }
 
 
-def _build_highlight_map(related, equipment, wall_classification, space_guid=None):
+def _build_highlight_map(related, equipment, wall_classification):
     hl = {}
     for e in related:
         if e.is_a('IfcWall'):
-            # space_guid가 주어지면(특정 공간 조회 컨텍스트) pair-level 라벨을 우선 사용해
-            # wall_simple_area 집계와 하이라이트 색상이 어긋나지 않도록 한다.
-            if space_guid is not None:
-                result, _ = wall_classification.get((e.GlobalId, space_guid),
-                                                     wall_classification.get(e.GlobalId, ('판정불가', '')))
-            else:
-                result, _ = wall_classification.get(e.GlobalId, ('판정불가', ''))
+            result, _ = wall_classification.get(e.GlobalId, ('판정불가', ''))
             simple, _ = _wall_display_category(result)
             if simple == '내부':
                 hl[e.GlobalId] = 'wall_internal'

@@ -139,48 +139,33 @@ def _compute_breakdowns(data_a, data_b, matched_pairs, status_cb=None):
         if status_cb and total:
             status_cb(f'구조부재 집계 계산 중: {m["A_공간"]} ({i}/{total})')
         bd_a = fc.build_space_structural_breakdown(
-            data_a['ifc_file'], data_a['element_classification'], data_a['wall_classification'], m['A_entity'])
+            data_a['ifc_file'], data_a['element_classification'], m['A_entity'])
         bd_b = fc.build_space_structural_breakdown(
-            data_b['ifc_file'], data_b['element_classification'], data_b['wall_classification'], m['B_entity'])
+            data_b['ifc_file'], data_b['element_classification'], m['B_entity'])
         out.append((m, bd_a, bd_b))
     return out
 
 
-def _floor_class_summary(ifc_file, storey_dict, walls_by_storey=None):
+def _floor_class_summary(ifc_file, storey_dict):
     """해당 층에 '배치된' 전체 구조부재를 클래스별로 집계한다 (공간 매칭/안분과 무관하게
-    층 하나에 속한 부재 전체를 그대로 합산).
+    층 하나에 속한 부재 전체를 그대로 합산 - 계산 비용이 거의 없다: footprint 폴리곤도,
+    RelSpaceBoundary 정밀계산도 필요 없음).
     면적 산정은 공간별 집계(build_space_structural_breakdown)와 동일한 우선순위를 따르되
     안분(apportion)은 하지 않는다(층 전체 기준이라 여러 공간에 걸치는지 여부가 무관함):
-      - IfcWall/IfcWallStandardCase: 좌표 기반 bounding치수(폭x높이) 전체값.
+      - IfcWall/IfcWallStandardCase: Qto_WallBaseQuantities.Gross_Side_Area 전체값.
       - _STRUCTURAL_AREA_MEANINGFUL_CLASSES(Slab/Roof/Covering/Door/Window/CurtainWall):
-        ite._area_columns() 전체값(Qto 속성은 신뢰도 문제로 사용하지 않고 좌표 직접계산을
-        최우선으로 사용함).
+        ite._area_columns() 전체값(이제 Qto 정식 수량값을 최우선으로 사용함).
       - 그 외 클래스: 개수만.
-    [수정사항] 기존에는 `elements`를 ELEMENT_CLASSIFICATION_TARGET_CLASSES로만 구했는데
-    이 집합에 IfcWall이 빠져있어, 벽에 대한 집계 분기가 있었음에도 실제로는 단 한 번도
-    실행되지 못하고 시트에서 벽이 통째로 누락되고 있었다(데드 코드). 벽은 별도로
-    수집하되, 벽의 IFC 컨테이너 소속 층과 실제 관계된 공간의 소속 층이 어긋나는 원본
-    데이터 사례가 있어(실측 확인) 이를 보정하는 _wall_footprints_by_storey()의 결과를
-    재사용한다. 이 결과는 파일 하나당 한 번만 계산하는 게 좋으므로(벽 footprint
-    계산은 비용이 있음) 호출부에서 미리 계산해 넘기는 걸 권장하며, 넘기지 않으면
-    이 함수가 그때그때 계산한다."""
+    반환: {클래스: {'count':int, 'area':float|None}}"""
     elements = fc.get_elements_for_storey(storey_dict, classes=set(ite.ELEMENT_CLASSIFICATION_TARGET_CLASSES))
     summary = defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False})
-
-    if walls_by_storey is None:
-        walls_by_storey = ite._wall_footprints_by_storey(ifc_file, fc)
-    for w, _fp in walls_by_storey.get(storey_dict['entity'].GlobalId, []):
-        area_val, _src = fc._get_wall_side_area_m2(w)
-        cls = w.is_a()
-        summary[cls]['count'] += 1
-        if area_val is not None:
-            summary[cls]['area'] += area_val
-            summary[cls]['_has_area'] = True
-
     for e in elements:
         cls = e.is_a()
         area_val = None
-        if cls in fc._STRUCTURAL_AREA_MEANINGFUL_CLASSES:
+        if cls in ('IfcWall', 'IfcWallStandardCase'):
+            flat = ite._flatten_psets(e)
+            area_val, _src = fc._get_wall_side_area_m2(e, flat_props=flat)
+        elif cls in fc._STRUCTURAL_AREA_MEANINGFUL_CLASSES:
             flat = ite._flatten_psets(e)
             cols = ite._area_columns(e, flat)
             area_val = cols['면적(㎡)']
@@ -194,18 +179,16 @@ def _floor_class_summary(ifc_file, storey_dict, walls_by_storey=None):
 
 def build_floor_level_comparison_df(data_a, data_b, floor_mapping):
     """03c_층단위_부재비교 시트용 DataFrame: 공간 매칭과 무관하게, 매핑된 층 쌍마다
-    전체 부재를 클래스별로 집계해 A/B 개수·면적을 비교한다. 벽의 층별 footprint 계산은
-    파일당 한 번만(_wall_footprints_by_storey) 수행해 여러 층을 순회해도 중복계산되지
-    않도록 한다."""
+    전체 부재를 클래스별로 집계해 A/B 개수·면적을 비교한다. 이미 로드된 IFC 정보만
+    사용하므로(공간 footprint 계산도, RelSpaceBoundary 정밀계산도 필요 없음) 추가
+    지오메트리 계산 비용이 거의 없다."""
     rows = []
     storeys_b_by_name = {s['Name']: s for s in data_b['storeys']}
-    walls_by_storey_a = ite._wall_footprints_by_storey(data_a['ifc_file'], fc)
-    walls_by_storey_b = ite._wall_footprints_by_storey(data_b['ifc_file'], fc)
     for a_storey in data_a['storeys']:
         a_name = a_storey['Name']
         b_name = floor_mapping.get(a_name)
-        summary_a = _floor_class_summary(data_a['ifc_file'], a_storey, walls_by_storey_a)
-        summary_b = (_floor_class_summary(data_b['ifc_file'], storeys_b_by_name[b_name], walls_by_storey_b)
+        summary_a = _floor_class_summary(data_a['ifc_file'], a_storey)
+        summary_b = (_floor_class_summary(data_b['ifc_file'], storeys_b_by_name[b_name])
                      if b_name and b_name in storeys_b_by_name else {})
 
         for cls in sorted(set(summary_a) | set(summary_b)):
