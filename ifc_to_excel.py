@@ -194,29 +194,7 @@ def _profile_xy_extent(profile):
     return None, None
 
 
-def _item_extent_corners(it):
-    """Body 아이템 하나의 로컬 좌표계 기준 대표 코너/정점 좌표들을 반환한다.
-    여러 아이템(레이어·하드웨어 부품 등)을 하나로 합쳐 전체 bbox를 구할 때 쓰인다."""
-    if it.is_a('IfcExtrudedAreaSolid'):
-        x, y = _profile_xy_extent(it.SweptArea)
-        if x is None:
-            return []
-        depth = it.Depth
-        return [(sx, sy, sz) for sx in (0, x) for sy in (0, y) for sz in (0, depth)]
-    if it.is_a('IfcPolygonalFaceSet') or it.is_a('IfcTriangulatedFaceSet'):
-        try:
-            return [tuple(p) for p in it.Coordinates.CoordList]
-        except Exception:
-            return []
-    return []
-
-
 def _get_local_dimensions(ent):
-    """엔티티의 로컬 X/Y/Z 치수를 구한다.
-    [수정사항] 기존에는 Body의 여러 아이템 중 첫 번째로 발견된 것의 bbox만 반환했음
-    (예: 문에 손잡이·힌지 등 소형 하드웨어가 별도 IfcPolygonalFaceSet으로 먼저 나열된
-    경우, 그 하드웨어 크기가 문 전체 치수로 잘못 채택됨). 이제 Body의 모든 아이템(압출체+
-    메쉬)의 코너/정점을 하나로 합쳐 전체를 아우르는 bbox를 계산한다."""
     if ent.Representation:
         for rep in ent.Representation.Representations:
             if rep.RepresentationIdentifier == 'Box':
@@ -225,22 +203,21 @@ def _get_local_dimensions(ent):
                         return it.XDim, it.YDim, it.ZDim, 'BoundingBox(원본기록값)'
 
     items = _resolve_body_items(ent)
-    all_pts = []
-    n_used = 0
+
     for it in items:
-        pts = _item_extent_corners(it)
-        if pts:
-            all_pts.extend(pts)
-            n_used += 1
+        if it.is_a('IfcExtrudedAreaSolid'):
+            x, y = _profile_xy_extent(it.SweptArea)
+            if x is not None:
+                return x, y, it.Depth, '단면좌표+Depth(직접계산)'
 
-    if not all_pts:
-        return None, None, None, None
+    for it in items:
+        if it.is_a('IfcPolygonalFaceSet'):
+            coords = it.Coordinates.CoordList
+            arr = np.array(coords, dtype=float)
+            ext = arr.max(axis=0) - arr.min(axis=0)
+            return float(ext[0]), float(ext[1]), float(ext[2]), '메쉬좌표bbox(직접계산)'
 
-    arr = np.array(all_pts, dtype=float)
-    ext = arr.max(axis=0) - arr.min(axis=0)
-    src = (f'Body 아이템 {n_used}개 통합bbox(직접계산)' if n_used > 1
-           else '단일 body 아이템 bbox(직접계산)')
-    return float(ext[0]), float(ext[1]), float(ext[2]), src
+    return None, None, None, None
 
 
 def _dimension_columns(ent, length_unit_scale=0.001):
@@ -352,19 +329,33 @@ _AREA_KEY_RE = re.compile(r'area', re.IGNORECASE)
 _RATIO_KEY_RE = re.compile(r'ratio', re.IGNORECASE)
 
 
-def _get_pset_area_fallback(flat_props):
-    """좌표 기반 계산이 모두 실패한 경우에 한해 참고하는 최후의 폴백.
-    [수정사항] Qto 속성은 신뢰도 문제로 완전히 배제하고, 그 외 비표준 Pset의
-    면적성 속성만 후보로 삼는다."""
+def _get_qto_area(flat_props):
     candidates = []
     for key, val in flat_props.items():
         if not isinstance(val, (int, float)):
             continue
-        if key.startswith('Qto_'):
+        if not key.startswith('Qto_'):
             continue
         if not _AREA_KEY_RE.search(key) or _RATIO_KEY_RE.search(key):
             continue
-        candidates.append((0 if 'Gross' in key else 1, key, val))
+        score = 0 if 'Gross' in key else (1 if 'Net' in key else 2)
+        candidates.append((score, key, val))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda c: c[0])
+    _, key, val = candidates[0]
+    return val, key
+
+
+def _get_pset_area_fallback(flat_props):
+    candidates = []
+    for key, val in flat_props.items():
+        if not isinstance(val, (int, float)):
+            continue
+        if not _AREA_KEY_RE.search(key) or _RATIO_KEY_RE.search(key):
+            continue
+        score = (0 if key.startswith('Qto_') else 1, 0 if 'Gross' in key else 1)
+        candidates.append((score, key, val))
     if not candidates:
         return None, None
     candidates.sort(key=lambda c: c[0])
@@ -484,62 +475,29 @@ def _get_union_footprint_area_m2(ent, tol=0.05):
     return None, None
 
 
-_FOOTPRINT_AREA_CLASSES = {'IfcSlab', 'IfcRoof', 'IfcCovering', 'IfcSpace'}
-
-
-def _get_footprint_polygon_area_m2(ent):
-    """평면형(수평) 요소의 면적을, floorplan_core에 이미 구현되어 있고 검증된
-    평면투영 footprint 계산(z=zmin 삼각형만 골라 union, 여러 조각도 안전하게 통합)을
-    재사용해 구한다. Qto 속성은 참조하지 않는다."""
-    try:
-        import floorplan_core as fc
-    except ImportError:
-        return None, None
-    try:
-        poly = fc.get_footprint_polygon_cached(ent)
-    except Exception:
-        return None, None
-    if poly is None or poly.is_empty:
-        return None, None
-    return poly.area, '평면투영 footprint(다중조각 union, 직접계산)'
-
-
 def _area_columns(ent, flat_props, length_unit_scale=0.001):
-    """[수정사항] Qto 속성(Qto_*.Gross_Area 등)은 저작 툴/생성기에 따라 실제 지오메트리와
-    괴리되는 사례가 확인되어(예: 동일 바닥면적의 슬래브인데 Qto값이 2배 이상 차이)
-    완전히 배제하고, 좌표(지오메트리) 직접계산을 항상 우선 사용한다. 이렇게 하면 서로
-    다른 IFC(전문가 저작 vs AI 생성)를 비교할 때 계산 기준이 동일해진다."""
-    cls = ent.is_a()
+    area, source_key = _get_qto_area(flat_props)
+    if area is not None:
+        return {'면적(㎡)': round(area, 4), '면적산출방식': f'Qto값 사용({source_key})'}
 
-    # 1순위: 평면형 요소(슬래브/지붕/커버링/공간) - 다중조각도 안전한 검증된 footprint 재사용
-    if cls in _FOOTPRINT_AREA_CLASSES:
-        area_m2, method = _get_footprint_polygon_area_m2(ent)
-        if area_m2 is not None:
-            return {'면적(㎡)': round(area_m2, 4), '면적산출방식': method}
-
-    # 2순위: 커튼월 - 하위부품 union 방식
-    if cls == 'IfcCurtainWall':
+    if ent.is_a() == 'IfcCurtainWall':
         area_m2, method = _get_union_footprint_area_m2(ent)
         if area_m2 is not None:
             return {'면적(㎡)': round(area_m2, 4), '면적산출방식': method}
 
-    # 3순위: 문/창 등 - 전체 bounding치수(폭x높이) 기반
     area, method = None, None
-    if cls in SYSTEM_ASSEMBLY_CLASSES:
+    if ent.is_a() in SYSTEM_ASSEMBLY_CLASSES:
         area, method = _get_system_bounding_face_area(ent)
         if area is None:
             area, method = _get_assembly_bounding_face_area(ent)
 
-    # 4순위: 최후 폴백 - 단일 body 기준 직접계산(다중조각 미대응, 위 방법들이 모두 실패한
-    # 경우에만 도달)
     if area is None:
         area, method = _get_footprint_area(ent)
 
-    # 5순위: 좌표 계산이 전부 실패한 경우에 한해서만 비Qto Pset 속성값 참고
     if area is None:
         area, source_key = _get_pset_area_fallback(flat_props)
         if area is not None:
-            method = f'Pset값 사용({source_key}) - 좌표계산 실패로 인한 참고값'
+            method = f'Pset값 사용({source_key})'
         else:
             method = '산출불가(좌표계산 실패 + Pset값 없음)'
     else:
