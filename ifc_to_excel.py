@@ -222,39 +222,64 @@ def _profile_xy_extent(profile):
     return None, None
 
 
-def _item_extent_corners(it):
+def _item_extent_corners(it, fallback_rotation=None):
     """Body 아이템 하나의 로컬 좌표계(엔티티 자체 기준) 코너/정점 좌표들을 반환한다.
     여러 아이템(레이어·하드웨어 부품 등)을 하나로 합쳐 전체 bbox를 구할 때 쓰인다.
-    [수정사항] IfcExtrudedAreaSolid의 프로파일은 자신의 Position(엔티티 로컬 프레임
+    [수정사항 1] IfcExtrudedAreaSolid의 프로파일은 자신의 Position(엔티티 로컬 프레임
     내에서의 오프셋+회전)을 기준으로 배치되는데, 예전엔 이를 무시하고 모든 압출체가
     원점(0,0,0)에서 시작한다고 가정했음. 벽 하나가 서로 수직인 압출체 2개(예: L자
     코너를 이루는 두 조각)로 구성된 경우, Position을 무시하면 두 조각이 실제로는
     겹치는 위치에 있는데도 서로 다른 원점 기준으로 합쳐져 폭x폭이 곱해진 것처럼
-    부풀려진 bbox가 나오는 문제가 실측으로 확인됨(21m 벽 하나가 450㎡로 과대산정)."""
+    부풀려진 bbox가 나오는 문제가 실측으로 확인됨(21m 벽 하나가 450㎡로 과대산정).
+    [수정사항 2] 일부 IFC는 압출체 2개 중 하나의 Position에 회전축(Axis)과 기준방향
+    (RefDirection)이 둘 다 정의되지 않은(NULL) 경우가 있는데, 이때 회전이 없는(단위
+    행렬) 것으로 처리하면 - 같은 형태를 다른 로컬 축 관례로 표현한 형제 아이템(예:
+    프로파일이 (10,200)/(200,10)로 서로 축만 바뀐 사실상 동일 형태)과 정렬이 안 맞아
+    결합 bbox가 실제보다 훨씬 크게 부풀려지는 문제가 실측 확인됨(실제 200mm 폭인 벽이
+    1300mm로 계산됨). 회전 정보가 없는 아이템은, 같은 엔티티의 다른 아이템에서 이미
+    확인된 회전(fallback_rotation)을 대신 상속해 이 문제를 피한다 - 같은 벽체를 이루는
+    레이어/조각들은 보통 동일한 전체 회전을 공유하고 있을 가능성이 높기 때문이다.
+    반환: (코너점 목록, 이 아이템에서 실제로 사용한 회전행렬 또는 None[회전정보 없었음])"""
     if it.is_a('IfcExtrudedAreaSolid'):
         x, y = _profile_xy_extent(it.SweptArea)
         if x is None:
-            return []
+            return [], None
         depth = it.Depth
         # IfcRectangleProfileDef 등 프로파일은 자신의 Position 원점에 대해 대칭 배치되는
         # 것이 IFC 표준 관례
         local_corners = [(sx, sy, sz) for sx in (-x / 2, x / 2) for sy in (-y / 2, y / 2) for sz in (0, depth)]
+
+        pos = it.Position
+        has_rotation_info = pos is not None and (pos.Axis is not None or pos.RefDirection is not None)
+        rot_used = None
         try:
             import ifcopenshell.util.placement as plc
-            m = plc.get_axis2placement(it.Position) if it.Position else np.eye(4)
+            if pos is None:
+                m = np.eye(4)
+            elif has_rotation_info:
+                m = plc.get_axis2placement(pos)
+                rot_used = m
+            elif fallback_rotation is not None:
+                # 회전정보 없음 -> 형제 아이템의 회전을 상속하고, 이 아이템 자신의 위치
+                # (Location)만 그대로 사용
+                m = fallback_rotation.copy()
+                m[:3, 3] = np.array(plc.get_axis2placement(pos))[:3, 3]
+                rot_used = fallback_rotation
+            else:
+                m = plc.get_axis2placement(pos) if pos else np.eye(4)
         except Exception:
             m = np.eye(4)
         pts = []
         for (lx, ly, lz) in local_corners:
             p = m @ np.array([lx, ly, lz, 1.0])
             pts.append((p[0], p[1], p[2]))
-        return pts
+        return pts, rot_used
     if it.is_a('IfcPolygonalFaceSet') or it.is_a('IfcTriangulatedFaceSet'):
         try:
-            return [tuple(p) for p in it.Coordinates.CoordList]
+            return [tuple(p) for p in it.Coordinates.CoordList], None
         except Exception:
-            return []
-    return []
+            return [], None
+    return [], None
 
 
 def _get_local_dimensions(ent):
@@ -273,8 +298,11 @@ def _get_local_dimensions(ent):
     items = _resolve_body_items(ent)
     all_pts = []
     n_used = 0
+    fallback_rotation = None
     for it in items:
-        pts = _item_extent_corners(it)
+        pts, rot_used = _item_extent_corners(it, fallback_rotation=fallback_rotation)
+        if rot_used is not None:
+            fallback_rotation = rot_used
         if pts:
             all_pts.extend(pts)
             n_used += 1
@@ -419,6 +447,26 @@ def _get_pset_area_fallback(flat_props):
 
 
 SYSTEM_ASSEMBLY_CLASSES = {'IfcDoor', 'IfcWindow', 'IfcCurtainWall'}
+
+def _get_wall_height_length_mm(ent):
+    """벽 하나의 (높이, 길이)를 mm 단위로 분리 반환한다. floorplan_core._get_wall_side_area_m2
+    와 동일한 '층고 범위(1.5~8m) 인식' 규칙을 쓴다 - 벽 조립체의 대표 높이를 정할 때
+    재사용하기 위해 별도 함수로 분리."""
+    x, y, z, src = _get_local_dimensions(ent)
+    dims_list = [d for d in (x, y, z) if d is not None]
+    if len(dims_list) < 2:
+        return None, None
+    plausible_height = [d for d in dims_list if 1500.0 <= d <= 8000.0]
+    if plausible_height:
+        height = max(plausible_height)
+        remaining = list(dims_list)
+        remaining.remove(height)
+        length = max(remaining) if remaining else height
+    else:
+        dims_sorted = sorted(dims_list, reverse=True)
+        length, height = dims_sorted[0], dims_sorted[1]
+    return height, length
+
 
 def _get_system_bounding_face_area(ent):
     x, y, z, src = _get_local_dimensions(ent)
@@ -711,6 +759,25 @@ def _edges_parallel_overlap_length(edges1, edges2, max_gap, angle_tol=0.05):
             if overlap > best:
                 best = overlap
     return best
+
+
+def _assembly_length_m(union_footprint):
+    """벽 조립체(여러 재료 레이어를 합친) union footprint에서 실제 '길이'(벽이 뻗은
+    방향의 장변)를 최소회전사각형 기준으로 구한다(m 단위, union_footprint는 이미 m
+    단위 좌표). 조립체는 여러 조각이 이어져 약간 어긋난 MultiPolygon일 수 있어 단순
+    축정렬 bbox보다 회전에 안전한 이 방식을 쓴다."""
+    try:
+        mrr = union_footprint.minimum_rotated_rectangle
+        coords = list(mrr.exterior.coords)
+        side_a = ((coords[1][0] - coords[0][0]) ** 2 + (coords[1][1] - coords[0][1]) ** 2) ** 0.5
+        side_b = ((coords[2][0] - coords[1][0]) ** 2 + (coords[2][1] - coords[1][1]) ** 2) ** 0.5
+        return max(side_a, side_b)
+    except Exception:
+        try:
+            minx, miny, maxx, maxy = union_footprint.bounds
+            return max(maxx - minx, maxy - miny)
+        except Exception:
+            return None
 
 
 def _group_wall_assemblies(walls_fp, fc, max_gap=0.1, min_overlap_abs=0.3, min_overlap_ratio=0.6):

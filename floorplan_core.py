@@ -923,30 +923,20 @@ def _get_wall_side_area_m2(ent, flat_props=None):
     X/Y가 실제 높이(Z)보다도 커져서 진짜 높이가 버려지고 대신 두 평면(X,Y) 치수끼리
     곱해지는 - 입면적이 아니라 사실상 평면적에 가까운 값이 나오는 문제가 실측으로
     확인됨(1.ifc 18건, 2.ifc 7건). 벽은 일반적 층고 범위(1.5~8m)에 해당하는 값이
-    있으면 그것을 높이로 확정하고 나머지 중 가장 큰 값을 폭으로 곱한다 - 문/창호/
-    커튼월은 이 함수를 쓰지 않으므로(별도 경로) 영향 없음."""
+    있으면 그것을 높이로 확정하고 나머지 중 가장 큰 값을 폭으로 곱한다(ite._get_wall_
+    height_length_mm에 위임 - 조립체 재계산에서도 동일 규칙을 재사용하기 위해 공통
+    함수로 분리함). 문/창호/커튼월은 이 함수를 쓰지 않으므로(별도 경로) 영향 없음."""
     key = ent.GlobalId
     if key in _wall_side_area_cache:
         return _wall_side_area_cache[key]
 
-    x, y, z, src = ite._get_local_dimensions(ent)
-    dims_list = [d for d in (x, y, z) if d is not None]
-    if len(dims_list) < 2:
+    height, width = ite._get_wall_height_length_mm(ent)
+    if height is None or width is None:
         result = (None, None)
     else:
-        plausible_height = [d for d in dims_list if 1500.0 <= d <= 8000.0]
-        if plausible_height:
-            height = max(plausible_height)
-            remaining = list(dims_list)
-            remaining.remove(height)
-            width = max(remaining) if remaining else height
-            raw_area = height * width
-            note = '벽높이인식'
-        else:
-            dims_sorted = sorted(dims_list, reverse=True)
-            raw_area = dims_sorted[0] * dims_sorted[1]
-            note = '일반'
-        result = (raw_area * 1e-6, f'폴백-시스템 전체 bounding치수 기반(폭x높이, 두께제외; {note}; {src})')
+        raw_area = height * width
+        note = '벽높이인식' if 1500.0 <= height <= 8000.0 else '일반'
+        result = (raw_area * 1e-6, f'폴백-시스템 전체 bounding치수 기반(폭x높이, 두께제외; {note})')
 
     _wall_side_area_cache[key] = result
     return result
@@ -955,23 +945,70 @@ def _get_wall_side_area_m2(ent, flat_props=None):
 _wall_space_split_cache = {}
 
 
+def _assembly_space_fraction(union_footprint, space_footprint, buffer_dist=_APPORTION_BUFFER_M):
+    """조립체(여러 재료 레이어를 합친) union footprint 중, 이 공간과 접하는 비중(0~1)을
+    구한다. 여러 공간에 걸친 조립체의 안분 비율 계산에 쓰인다."""
+    if union_footprint is None or union_footprint.is_empty or space_footprint is None or space_footprint.is_empty:
+        return 0.0
+    if union_footprint.area <= 0:
+        return 0.0
+    buffered_space = space_footprint.buffer(buffer_dist)
+    inter = union_footprint.intersection(buffered_space)
+    return inter.area / union_footprint.area
+
+
+def _compute_assembly_own_area(members, own_areas, union_footprint):
+    """조립체 하나의 '자체' 면적(공간 안분 이전)을 계산한다.
+    - 멤버 1개(대다수 벽): 그 멤버의 own_area 그대로(기존과 동일)
+    - 멤버 여럿(마감+구조체 등 레이어 묶음): 개별 own_area를 더하지 않고, union
+      footprint 길이 x 대표 높이로 다시 계산해 레이어 중복 집계를 막는다."""
+    if len(members) == 1:
+        return own_areas[members[0][0]]
+    heights = []
+    for g, w in members:
+        h, _l = ite._get_wall_height_length_mm(w)
+        if h is not None:
+            heights.append(h)
+    plausible_heights = [h for h in heights if 1500.0 <= h <= 8000.0]
+    height_mm = max(plausible_heights) if plausible_heights else (max(heights) if heights else None)
+    length_m = ite._assembly_length_m(union_footprint)
+    if height_mm is not None and length_m is not None:
+        return (height_mm / 1000.0) * length_m
+    rep_guid = max(own_areas, key=own_areas.get)
+    return own_areas[rep_guid]
+
+
 def compute_wall_space_splits(ifc_file, storey_entity):
     """[신규] 층 안의 모든 벽을, 접한 공간들에게 '배분액의 합 = 벽 자신의 총면적'이 되도록
     미리 분할해둔다(층 단위로 정확히 한 번 계산). 공간별 조회(build_space_detail 등)는
     이 결과에서 (벽,공간) 키로 값을 찾아오기만 하면 되므로, 여러 공간에 걸친 벽을 각
     공간에 전액씩 중복 부여하던 문제가 애초에 발생하지 않는다(총량 = 분할합산 + 잔여
     등식이 근사가 아니라 항상 정확히 성립).
-    분배 비율은 기존 _apportioned_area()가 이미 계산하는 세그먼트/footprint 기반
-    기하학적 가중치를 그대로 재사용하되, 공간들에 대한 값의 합이 own_area가 되도록
-    정규화(rescale)한다 - 그래서 단순 균등분할보다, 각 공간과 실제로 맞닿은 구간의
-    비중(예: 여러 방을 지나는 긴 복도벽에서 방마다 접한 길이가 다른 경우)을 더 정확히
-    반영한다. 기하 계산이 전부 실패하면 균등분할로 폴백한다.
-    반환: {(wall_guid, space_guid): 배분된_면적(㎡)}"""
+
+    [수정사항] 벽을 개별 IfcWall 엔티티 단위로 처리하면, 마감(석고보드)+구조체(콘크리트/
+    조적) 등 같은 벽면을 이루는 재료 레이어가 여러 엔티티로 나뉘어 모델링된 경우 - 이들이
+    전부 같은 공간과 접하므로 - 그 벽면 하나의 면적이 레이어 수만큼 중복 합산되는 문제가
+    실측으로 확인됨(예: 마감 12.36㎡ + 구조체 11.34㎡가 같은 벽면인데 둘 다 더해져 23.7㎡로
+    잡힘). 이제 벽을 먼저 조립체(내/외벽 판정에 쓰는 것과 동일한 _group_wall_assemblies)로
+    묶고:
+      - 레이어가 1개뿐인 조립체(대다수)는 기존과 동일하게 처리
+      - 레이어가 여럿인 조립체는 개별 own_area를 더하지 않고, 조립체 전체를 합친 실제
+        형상(union footprint)에서 길이를, 멤버 중 대표 높이를 가져와 '조립체 전체 면적'
+        하나만 다시 계산해 사용한다 - 개별 레이어 하나의 bbox 계산이 특이 형상 탓에
+        튀더라도(이 대화에서 여러 번 발견한 유형의 오차) 합친 형상 기준이라 덜 민감하다.
+    분배 비율은 조립체의 union footprint와 공간 footprint의 기하학적 겹침 비중을 쓰고,
+    공간들에 대한 값의 합이 조립체 전체 면적이 되도록 정규화한다.
+
+    반환: (splits, wall_to_representative)
+      - splits: {(대표_wall_guid, space_guid): 배분된_면적(㎡)}
+      - wall_to_representative: {모든_wall_guid: 그 벽이 속한 조립체의 대표_wall_guid}
+        (단일 레이어 벽은 자기 자신이 대표) - build_space_detail 등에서 같은 조립체의
+        멤버가 여러 개 related에 들어와도 대표 하나만 한 번 세도록 이 매핑을 쓴다."""
     import sys
     _self = sys.modules[__name__]
     walls_by_storey = ite._wall_footprints_by_storey(ifc_file, _self)
     walls_here = walls_by_storey.get(storey_entity.GlobalId, [])
-    wall_fp_by_guid = {w.GlobalId: fp for w, fp in walls_here}
+    wall_ent_by_guid = {w.GlobalId: w for w, _fp in walls_here}
 
     spaces = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
     space_fp_by_guid = {sp.GlobalId: get_footprint_polygon_cached(sp) for sp in spaces}
@@ -983,35 +1020,52 @@ def compute_wall_space_splits(ifc_file, storey_entity):
             if e.is_a('IfcWall'):
                 wall_to_spaces[e.GlobalId].append(sp)
 
+    assemblies = ite._group_wall_assemblies(walls_here, _self)
+
     splits = {}
-    for w, _fp in walls_here:
-        touching = wall_to_spaces.get(w.GlobalId, [])
+    wall_to_representative = {}
+
+    for asm in assemblies:
+        members = [(g, wall_ent_by_guid[g]) for g in asm['guids'] if g in wall_ent_by_guid]
+        if not members:
+            continue
+
+        touching = {}
+        for g, _w in members:
+            for sp in wall_to_spaces.get(g, []):
+                touching[sp.GlobalId] = sp
         if not touching:
-            continue
-        own, _src = _get_wall_side_area_m2(w)
-        if own is None or own <= 0:
-            continue
-        w_fp = wall_fp_by_guid.get(w.GlobalId)
-
-        if len(touching) == 1:
-            splits[(w.GlobalId, touching[0].GlobalId)] = round(own, 4)
+            for g, _w in members:
+                wall_to_representative[g] = members[0][0]
             continue
 
-        raw = {}
-        for sp in touching:
-            sp_fp = space_fp_by_guid.get(sp.GlobalId)
-            val, _method = _apportioned_area(ifc_file, w, sp, own, sp_fp, wall_footprint_polygon=w_fp)
-            raw[sp.GlobalId] = max(val, 0.0)
+        own_areas = {g: (_get_wall_side_area_m2(w)[0] or 0.0) for g, w in members}
+        rep_guid = max(own_areas, key=own_areas.get)
+        for g, _w in members:
+            wall_to_representative[g] = rep_guid
+
+        assembly_area = _compute_assembly_own_area(members, own_areas, asm['union'])
+
+        if assembly_area is None or assembly_area <= 0:
+            continue
+
+        touching_list = list(touching.values())
+        if len(touching_list) == 1:
+            splits[(rep_guid, touching_list[0].GlobalId)] = round(assembly_area, 4)
+            continue
+
+        raw = {sp.GlobalId: _assembly_space_fraction(asm['union'], space_fp_by_guid.get(sp.GlobalId))
+               for sp in touching_list}
         total_raw = sum(raw.values())
         if total_raw <= 0:
-            n = len(touching)
-            for sp in touching:
-                splits[(w.GlobalId, sp.GlobalId)] = round(own / n, 4)
+            n = len(touching_list)
+            for sp in touching_list:
+                splits[(rep_guid, sp.GlobalId)] = round(assembly_area / n, 4)
         else:
-            for sp in touching:
-                splits[(w.GlobalId, sp.GlobalId)] = round(own * (raw[sp.GlobalId] / total_raw), 4)
+            for sp in touching_list:
+                splits[(rep_guid, sp.GlobalId)] = round(assembly_area * (raw[sp.GlobalId] / total_raw), 4)
 
-    return splits
+    return splits, wall_to_representative
 
 
 def _get_wall_space_splits_cached(ifc_file, storey_entity):
@@ -1055,27 +1109,38 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
     # 분할해둔 표(compute_wall_space_splits, 합=own_area 보장)를 조회만 하도록 바꿔
     # 이 등식이 항상 성립하게 한다.
     storey_entity = _find_space_storey(space_entity)
-    wall_splits = _get_wall_space_splits_cached(ifc_file, storey_entity) if storey_entity is not None else {}
+    wall_splits, wall_to_rep = (
+        _get_wall_space_splits_cached(ifc_file, storey_entity) if storey_entity is not None else ({}, {}))
 
     wall_simple_counts = Counter()
     wall_simple_area = Counter()
     wall_detail_counts = Counter()
-    wall_area_apportioned = True  
+    wall_area_apportioned = True
+    seen_assemblies = set()
     for e in related:
         if not e.is_a('IfcWall'):
             continue
+        # [수정사항] 마감(석고보드)+구조체(콘크리트/조적) 등 같은 벽면을 이루는 재료
+        # 레이어가 여러 IfcWall 엔티티로 나뉘어 모델링된 경우, 그냥 다 더하면 같은
+        # 벽면 하나가 레이어 수만큼 중복 집계되는 문제가 실측으로 확인됨(예: 마감+구조체
+        # 합쳐 23.7㎡인데 실제로는 한 벽면). 조립체(같은 벽면 레이어 묶음)당 대표 하나만
+        # 세고, 같은 조립체의 나머지 멤버는 건너뛴다.
+        rep_guid = wall_to_rep.get(e.GlobalId, e.GlobalId)
+        if rep_guid in seen_assemblies:
+            continue
+        seen_assemblies.add(rep_guid)
         # [수정사항] 벽 전체(GlobalId) 라벨만 쓰면, '혼합(내/외벽 복합)'으로 판정된 벽이
         # 접하는 모든 공간에서 일괄적으로 '외부(판정됨)'으로 집계되어(실제로는 일부
         # 공간에서는 내벽인데도) 여러 공간에 걸쳐 면적이 중복 과다산정되는 문제가 실측으로
         # 확인됨(예: 9개 공간과 접한 566㎡ 벽 하나가 9곳 전부에서 외벽으로 잡힘). 이 공간
         # 전용 pair-level 라벨이 있으면 그것을 우선 사용하고, 없을 때만(관계 자체가 없던
-        # 벽 등) 벽 전체 라벨로 폴백한다.
+        # 벽 등) 벽 전체 라벨로 폴백한다. 조립체를 대표하므로 라벨도 대표 GUID 기준.
         result, _reason = wall_classification.get(
-            (e.GlobalId, space_entity.GlobalId), wall_classification.get(e.GlobalId, ('판정불가', '')))
+            (rep_guid, space_entity.GlobalId), wall_classification.get(rep_guid, ('판정불가', '')))
         simple, detail_label = _wall_display_category(result)
         wall_simple_counts[simple] += 1
         wall_detail_counts[detail_label] += 1
-        area_val = wall_splits.get((e.GlobalId, space_entity.GlobalId))
+        area_val = wall_splits.get((rep_guid, space_entity.GlobalId))
         if area_val is not None:
             wall_simple_area[simple] += area_val
         else:
@@ -1148,11 +1213,18 @@ def compute_wall_area_attribution(ifc_file, storey_entity):
     벽(관계 0건 + 지오메트리 폴백도 실패)의 own_area 합계이며, 이런 벽은 대개
     방으로 모델링되지 않은 영역(주차장·설비공간 등)에 있거나, 드물게는 폴백
     허용거리(0.35m)를 벗어난 마감층일 수 있다.
+    [수정사항] '총량'도 개별 벽 엔티티를 그냥 다 더하면, 마감+구조체 등 같은 벽면의
+    재료 레이어가 여러 엔티티로 나뉜 경우 레이어 수만큼 중복 집계된다(compute_wall_
+    space_splits에서 고친 것과 같은 문제). '총량'과 '분할합산(matched)'이 같은
+    기준이어야 정합성 등식이 의미를 유지하므로, 총량도 조립체(레이어 묶음) 단위로
+    재계산한다 - 조립체당 대표 하나의 own_area(단일 레이어) 또는 union 재계산값
+    (다중 레이어)만 반영.
     반환: {'total','matched','residual','residual_count','residual_walls':[(name,guid,area),...]}"""
     import sys
     _self = sys.modules[__name__]
     walls_by_storey = ite._wall_footprints_by_storey(ifc_file, _self)
-    walls_here = [w for w, _fp in walls_by_storey.get(storey_entity.GlobalId, [])]
+    walls_here = walls_by_storey.get(storey_entity.GlobalId, [])
+    wall_ent_by_guid = {w.GlobalId: w for w, _fp in walls_here}
 
     spaces = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
     covered = set()
@@ -1160,17 +1232,27 @@ def compute_wall_area_attribution(ifc_file, storey_entity):
         related = get_space_related_elements(ifc_file, sp)
         covered.update(e.GlobalId for e in related if e.is_a('IfcWall'))
 
+    assemblies = ite._group_wall_assemblies(walls_here, _self)
+
     total = 0.0
     residual = 0.0
     residual_walls = []
-    for w in walls_here:
-        v, _src = _get_wall_side_area_m2(w)
-        if v is None:
+    for asm in assemblies:
+        members = [(g, wall_ent_by_guid[g]) for g in asm['guids'] if g in wall_ent_by_guid]
+        if not members:
             continue
-        total += v
-        if w.GlobalId not in covered:
-            residual += v
-            residual_walls.append((w.Name or '(이름없음)', w.GlobalId, round(v, 2)))
+        own_areas = {g: (_get_wall_side_area_m2(w)[0] or 0.0) for g, w in members}
+        assembly_area = _compute_assembly_own_area(members, own_areas, asm['union'])
+        if assembly_area is None or assembly_area <= 0:
+            continue
+        total += assembly_area
+        if not any(g in covered for g, _w in members):
+            residual += assembly_area
+            rep_guid = max(own_areas, key=own_areas.get)
+            rep_name = wall_ent_by_guid[rep_guid].Name or '(이름없음)'
+            if len(members) > 1:
+                rep_name += f' 외 레이어{len(members) - 1}개'
+            residual_walls.append((rep_name, rep_guid, round(assembly_area, 2)))
 
     residual_walls.sort(key=lambda x: -x[2])
     return {
@@ -1189,26 +1271,34 @@ def build_space_structural_breakdown(ifc_file, element_classification, wall_clas
     # 벽은 build_space_detail과 동일하게, 층 단위로 미리 분할해둔 표를 조회한다
     # (합=own_area 보장 -> 총량=분할합산+잔여 등식이 항상 성립).
     storey_entity = _find_space_storey(space_entity)
-    wall_splits = _get_wall_space_splits_cached(ifc_file, storey_entity) if storey_entity is not None else {}
+    wall_splits, wall_to_rep = (
+        _get_wall_space_splits_cached(ifc_file, storey_entity) if storey_entity is not None else ({}, {}))
 
     split = defaultdict(lambda: defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False}))
     total = defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False})
 
+    seen_assemblies = set()
     for e in related:
         cls = e.is_a()
         # [수정사항 1] 벽은 element_classification(비-벽 부재 전용 분류)에 아예 없어 항상
         # '판정불가'로 잡히던 별도 버그가 있었다 - 벽 전용 wall_classification을 사용한다.
         # [수정사항 2] 벽 전체(GlobalId) 라벨만 쓰면 '혼합' 벽이 접하는 모든 공간에서
         # 일괄 외부로 집계되는 문제가 있었다 - (벽,공간) pair-level 라벨을 우선 사용한다.
+        # [수정사항 3] 마감+구조체 등 같은 벽면의 재료 레이어가 여러 엔티티로 나뉜 경우
+        # 조립체 대표 하나만 세고 나머지 멤버는 건너뛴다(중복 집계 방지).
         if cls in ('IfcWall', 'IfcWallStandardCase'):
+            rep_guid = wall_to_rep.get(e.GlobalId, e.GlobalId)
+            if rep_guid in seen_assemblies:
+                continue
+            seen_assemblies.add(rep_guid)
             label, _reason = wall_classification.get(
-                (e.GlobalId, space_entity.GlobalId), wall_classification.get(e.GlobalId, ('판정불가', '')))
+                (rep_guid, space_entity.GlobalId), wall_classification.get(rep_guid, ('판정불가', '')))
         else:
             label, _reason = element_classification.get(e.GlobalId, ('판정불가', ''))
 
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
-            area_val = wall_splits.get((e.GlobalId, space_entity.GlobalId))
+            area_val = wall_splits.get((rep_guid, space_entity.GlobalId))
         elif cls in _STRUCTURAL_AREA_MEANINGFUL_CLASSES:
             flat = ite._flatten_psets(e)
             cols = ite._area_columns(e, flat)
