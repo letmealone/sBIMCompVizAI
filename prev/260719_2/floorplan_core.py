@@ -202,20 +202,6 @@ def get_footprint_polygon(ent, tol=0.05):
     return None
 
 
-_element_footprint_cache = {}
-
-
-def get_footprint_polygon_cached(ent):
-    """[면적 산정 중복계산 방지] 벽/슬래브 등 부재의 footprint는 공간과 무관하게
-    부재 자체에 고정된 값인데, 한 부재가 여러 공간에 걸쳐 있으면(예: 내벽이 양쪽
-    공간에서 각각 조회됨) 안분·판정 과정에서 같은 부재의 footprint가 공간 수만큼
-    반복 계산되고 있었다. GlobalId 기준으로 한 번만 계산해 재사용한다."""
-    key = ent.GlobalId
-    if key not in _element_footprint_cache:
-        _element_footprint_cache[key] = get_footprint_polygon(ent)
-    return _element_footprint_cache[key]
-
-
 def _grid_points_in_polygon(poly, spacing=0.5):
     minx, miny, maxx, maxy = poly.bounds
     xs = np.arange(minx, maxx + spacing, spacing)
@@ -592,7 +578,7 @@ def _apportioned_area(ifc_file, member_entity, target_space_entity, own_side_are
         return precise[target_space_entity.GlobalId], '정밀(RelSpaceBoundary)'
 
     if member_entity.is_a('IfcWall'):
-        wfp = wall_footprint_polygon if wall_footprint_polygon is not None else get_footprint_polygon_cached(member_entity)
+        wfp = wall_footprint_polygon if wall_footprint_polygon is not None else get_footprint_polygon(member_entity)
         if segment_polygon is None:
             seg_result = get_space_wall_segment_polygon(ifc_file, member_entity, target_space_entity, wfp)
             segment_polygon = seg_result[0] if seg_result is not None else None
@@ -609,7 +595,7 @@ def _apportioned_area(ifc_file, member_entity, target_space_entity, own_side_are
 def _space_portion_fraction(member_entity, space_footprint, buffer_dist=_APPORTION_BUFFER_M):
     if space_footprint is None or space_footprint.is_empty:
         return None
-    member_footprint = get_footprint_polygon_cached(member_entity)
+    member_footprint = get_footprint_polygon(member_entity)
     if member_footprint is None or member_footprint.is_empty or member_footprint.area <= 0:
         return None
     try:
@@ -687,54 +673,7 @@ def _space_wall_edge_overlap_local_points(wall_footprint, space_footprint, membe
     return local_pts if local_pts else None
 
 
-def get_local_thickness_window(wall_entity, seg_poly, thickness_reach=0.4, length_margin=0.0):
-    """세그먼트 폴리곤(공간 하나와 접하는 벽의 국소 조각)을 감싸는 윈도우를 만들되,
-    벽의 로컬 좌표계 기준으로 '길이 방향(로컬 X)'은 세그먼트 범위 + 작은 여유만 두고,
-    '두께/법선 방향(로컬 Y)'만 넉넉히(기본 0.6m) 확장한다.
-    [이유] 단순히 polygon.buffer(1.0)처럼 등방(모든 방향 동일)으로 키우면, 복도를 따라
-    이어지는 옆방(같은 쪽에 나란히 있는 다음 공간)까지 창이 넓어져 버그가 생긴다
-    (실측 확인: P-04 옆 P-03이 버퍼에 걸려 반대편 공간으로 오인됨). 벽의 실제 두께
-    방향으로만 확장해야 '반대편'을 정확히 검사할 수 있다."""
-    import ifcopenshell.util.placement as plc
-    try:
-        m = plc.get_local_placement(wall_entity.ObjectPlacement)
-        m_inv = np.linalg.inv(m)
-    except Exception:
-        return seg_poly.buffer(thickness_reach)
-
-    def to_local(pt):
-        world = np.array([pt[0] * 1000.0, pt[1] * 1000.0, 0.0, 1.0])
-        local = m_inv @ world
-        return local[0], local[1]
-
-    geoms = seg_poly.geoms if seg_poly.geom_type == 'MultiPolygon' else [seg_poly]
-    local_pts = []
-    for g in geoms:
-        local_pts.extend(to_local(p) for p in g.exterior.coords)
-    if not local_pts:
-        return seg_poly.buffer(thickness_reach)
-
-    xs = [p[0] for p in local_pts]
-    ys = [p[1] for p in local_pts]
-    length_margin_mm = length_margin * 1000.0
-    thickness_reach_mm = thickness_reach * 1000.0
-    # 관례상 로컬 X=벽 길이축, 로컬 Y=벽 두께(법선)축(이 코드베이스 전반의 기존 관례와 동일)
-    x_min, x_max = min(xs) - length_margin_mm, max(xs) + length_margin_mm
-    y_min, y_max = min(ys) - thickness_reach_mm, max(ys) + thickness_reach_mm
-
-    local_corners = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
-    world_pts = []
-    for (lx, ly) in local_corners:
-        w = m @ np.array([lx, ly, 0.0, 1.0])
-        world_pts.append((w[0] / 1000.0, w[1] / 1000.0))
-    try:
-        win = Polygon(world_pts)
-        return win if win.is_valid else seg_poly.buffer(thickness_reach)
-    except Exception:
-        return seg_poly.buffer(thickness_reach)
-
-
-def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_footprint_polygon, space_footprint=None):
+def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_footprint_polygon):
     import ifcopenshell.util.placement as plc
 
     try:
@@ -743,8 +682,7 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
     except Exception:
         return None
 
-    if space_footprint is None:
-        space_footprint = get_footprint_polygon_cached(space_entity)
+    space_footprint = get_footprint_polygon(space_entity) 
 
     rels = _get_boundary_index(ifc_file).get(wall_entity.GlobalId, [])
     local_pts = []
@@ -863,42 +801,30 @@ def get_space_wall_segment_polygon(ifc_file, wall_entity, space_entity, wall_foo
     return result, method
 
 
-_wall_side_area_cache = {}
-
-
 def _get_wall_side_area_m2(ent, flat_props=None):
-    """[수정사항] Qto_WallBaseQuantities.Gross_Side_Area는 신뢰도 문제로 더 이상
-    사용하지 않고 좌표 기반 bounding치수 계산만 사용한다. 또한 벽 하나가 여러
-    공간에 걸쳐 있으면(내벽) 공간마다 반복 호출되므로, 벽 자체의 '전체 옆면적'은
-    GlobalId 기준으로 한 번만 계산해 캐시한다(공간별로 달라지는 것은 이후 안분
-    비율뿐이며, 안분 비율 계산은 이 캐시와 무관하게 공간별로 그대로 수행된다)."""
-    key = ent.GlobalId
-    if key in _wall_side_area_cache:
-        return _wall_side_area_cache[key]
+    if flat_props is None:
+        flat_props = ite._flatten_psets(ent)
+    v = flat_props.get('Qto_WallBaseQuantities.Gross_Side_Area')
+    if isinstance(v, (int, float)):
+        return v, 'Qto값 사용(Qto_WallBaseQuantities.Gross_Side_Area)'
     raw_area, method = ite._get_system_bounding_face_area(ent)
     if raw_area is not None:
-        result = (raw_area * 1e-6, f'폴백-{method}')
-    else:
-        result = (None, None)
-    _wall_side_area_cache[key] = result
-    return result
+        return raw_area * 1e-6, f'폴백-{method}'
+    return None, None
 
 
 def build_space_detail(ifc_file, wall_classification, space_entity):
     related = get_space_related_elements(ifc_file, space_entity)
     equipment = get_space_contained_equipment(ifc_file, space_entity)
-    space_footprint = get_footprint_polygon_cached(space_entity)
+    space_footprint = get_footprint_polygon(space_entity)  
 
     wall_segment_polygons = {}
     wall_segment_methods = {}
-    wall_footprints = {}
     for e in related:
         if not e.is_a('IfcWall'):
             continue
-        wall_footprint = get_footprint_polygon_cached(e)
-        wall_footprints[e.GlobalId] = wall_footprint
-        result = get_space_wall_segment_polygon(ifc_file, e, space_entity, wall_footprint,
-                                                 space_footprint=space_footprint)
+        wall_footprint = get_footprint_polygon(e)
+        result = get_space_wall_segment_polygon(ifc_file, e, space_entity, wall_footprint)
         if result is not None:
             wall_segment_polygons[e.GlobalId], wall_segment_methods[e.GlobalId] = result
         else:
@@ -923,12 +849,12 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         simple, detail_label = _wall_display_category(result)
         wall_simple_counts[simple] += 1
         wall_detail_counts[detail_label] += 1
-        v, _src = _get_wall_side_area_m2(e)
+        flat = ite._flatten_psets(e)
+        v, _src = _get_wall_side_area_m2(e, flat_props=flat)
         if v is not None:
             area_val, method = _apportioned_area(
                 ifc_file, e, space_entity, v, space_footprint,
-                segment_polygon=wall_segment_polygons.get(e.GlobalId),
-                wall_footprint_polygon=wall_footprints.get(e.GlobalId))
+                segment_polygon=wall_segment_polygons.get(e.GlobalId))
             if method == '실패-전체값사용(과다산정 가능)':
                 wall_area_apportioned = False
             wall_simple_area[simple] += area_val
@@ -963,12 +889,15 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
 
     equipment_counts = Counter(e.is_a() for e in equipment)
 
-    # [수정사항] 공간 면적도 Qto(NetFloorArea/GrossFloorArea) 우선 사용을 중단하고,
-    # 다른 부재와 동일하게 좌표 기반 footprint 계산(_area_columns)으로 통일한다.
-    # (flat_sp는 좌표계산이 실패할 경우의 최후 폴백에서만 참고됨)
     flat_sp = ite._flatten_psets(space_entity)
-    cols = ite._area_columns(space_entity, flat_sp)
-    space_area, space_area_method = cols['면적(㎡)'], cols['면적산출방식']
+    space_area, space_area_method = None, None
+    for key in ('Qto_SpaceBaseQuantities.NetFloorArea', 'Qto_SpaceBaseQuantities.GrossFloorArea'):
+        if isinstance(flat_sp.get(key), (int, float)):
+            space_area, space_area_method = flat_sp[key], key
+            break
+    if space_area is None:
+        cols = ite._area_columns(space_entity, flat_sp)
+        space_area, space_area_method = cols['면적(㎡)'], cols['면적산출방식']
 
     return {
         'name': space_entity.Name or '(이름없음)',
@@ -991,7 +920,7 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
 
 def build_space_structural_breakdown(ifc_file, element_classification, space_entity):
     related = get_space_related_elements(ifc_file, space_entity)
-    space_footprint = get_footprint_polygon_cached(space_entity)
+    space_footprint = get_footprint_polygon(space_entity)
 
     split = defaultdict(lambda: defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False}))
     total = defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False})
@@ -1002,7 +931,8 @@ def build_space_structural_breakdown(ifc_file, element_classification, space_ent
 
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
-            v, _src = _get_wall_side_area_m2(e)
+            flat = ite._flatten_psets(e)
+            v, _src = _get_wall_side_area_m2(e, flat_props=flat)
             if v is not None:
                 area_val, _method = _apportioned_area(ifc_file, e, space_entity, v, space_footprint)
         elif cls in _STRUCTURAL_AREA_MEANINGFUL_CLASSES:

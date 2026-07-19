@@ -806,18 +806,11 @@ def _determine_wall_classification(ifc_file):
         else:
             result[w_guid] = ('판정불가', '근거 없음')
 
-    # 5. [조립체 병합 보정 - 국소화 버전] 재료 레이어별로 분리 모델링된 벽(마감+코어+마감
-    #    등)은 개별 레이어의 RelSpaceBoundary가 한쪽 공간에만 있거나(마감층) 아예 없어
-    #    (코어) 위 3~4단계에서 '외벽'/'판정불가'로 오판될 수 있다. 같은 층에서 서로
-    #    평행·근접(0.1m 이내)하며 겹치는 벽들을 하나의 조립체로 묶되,
-    #    [수정사항] 처음에는 "이 벽 멤버(GlobalId) 전체 footprint 주변"을 국소 윈도우로
-    #    썼는데, 벽 하나가 원래 16m처럼 길게 이어지며 여러 방을 지나가는 경우(예:
-    #    복도벽) 그 벽 "전체"의 footprint 자체가 이미 길어서 버퍼를 씌워도 전혀
-    #    국소화되지 않는 문제가 실측으로 확인됨. 올바르게 국소화하려면 "벽 전체"가
-    #    아니라 "이 벽이 특정 공간 s와 접하는 세그먼트(조각)" 하나만 윈도우로 잡아야
-    #    한다 - 이미 3단계에서 쓰는 get_space_wall_segment_polygon()으로 그 조각을 구할
-    #    수 있으므로 이를 재사용한다. 조각 주변 1m를 조립체 union과 교차시켜, 같은
-    #    국소 위치에 있는 다른 레이어(마감/코어)까지 포함한 국소 단면만 검사한다.
+    # 5. [조립체 병합 보정] 재료 레이어별로 분리 모델링된 벽(마감+코어+마감 등)은
+    #    개별 레이어의 RelSpaceBoundary가 한쪽 공간에만 있거나(마감층) 아예 없어(코어)
+    #    위 3~4단계에서 '외벽' 또는 '판정불가'로 오판될 수 있다. 같은 층에서 서로
+    #    평행·근접(0.15m 이내)하며 겹치는 벽들을 하나의 조립체로 묶어, 조립체 전체가
+    #    서로 다른 공간 2개 이상과 접하면 '내벽'으로 승격(보정)한다.
     walls_by_storey = _wall_footprints_by_storey(ifc_file, fc)
     for st_guid, walls_fp in walls_by_storey.items():
         if len(walls_fp) < 2:
@@ -826,90 +819,21 @@ def _determine_wall_classification(ifc_file):
         if not space_items:
             continue
         assemblies = _group_wall_assemblies(walls_fp, fc)
-        guid_to_asm = {}
         for asm in assemblies:
-            if len(asm['guids']) > 1:
-                for g in asm['guids']:
-                    guid_to_asm[g] = asm
-        fp_by_guid = {w.GlobalId: fp for w, fp in walls_fp}
-
-        for w_guid, spaces in wall_space_map.items():
-            asm = guid_to_asm.get(w_guid)
-            if asm is None:
+            if len(asm['guids']) <= 1:
+                continue  # 병합 대상(레이어)이 없으면 기존 판정 그대로 유지
+            touched = _assembly_touching_spaces(asm['union'], space_items)
+            if len(touched) < 2:
                 continue
-            w_fp = fp_by_guid.get(w_guid)
-            if w_fp is None or w_fp.is_empty:
-                continue
-            w_ent = ifc_file.by_id(w_guid)
-
-            for s in spaces:
-                key = (w_guid, s.GlobalId)
-                if result.get(key, ('', ''))[0] == '내벽':
-                    continue
-                s_fp = space_fps.get(s.GlobalId)
-                if not s_fp:
-                    continue
-
-                # 3단계와 동일하게, 이 벽이 '이 공간과 접하는' 국소 세그먼트만 추출
-                seg_result = fc.get_space_wall_segment_polygon(ifc_file, w_ent, s, w_fp)
-                if not seg_result or not seg_result[0]:
-                    continue
-                seg_poly, _m = seg_result
-
-                # [수정사항] 세그먼트를 등방(모든 방향 동일)으로 buffer(1.0)하면 복도를 따라
-                # 이어지는 옆방(같은 쪽에 나란히 있는 다음 공간)까지 창이 넓어져, 반대편이
-                # 아니라 '옆방'을 반대편 공간으로 오인하는 문제가 실측으로 확인됨. 벽의
-                # 두께(법선) 방향으로만 확장하는 윈도우를 사용한다.
-                local_window = fc.get_local_thickness_window(w_ent, seg_poly)
-                try:
-                    local_union = asm['union'].intersection(local_window)
-                except Exception:
-                    continue
-                if local_union.is_empty:
-                    continue
-                # [수정사항] adjacency_tol=0으로 하면, 정상적으로 딱 맞닿아있는(gap=0) 공간도
-                # 폴리곤 교집합 면적이 0이 되어(경계선 접촉은 면적이 없음) 아예 못 잡는
-                # 문제가 있었다(실측 확인: 정상 케이스도 겹침 0으로 나옴). 반대로 너무 큰
-                # 버퍼(0.15)는 옆방까지 잡는 문제가 있었다. 실측 검증 결과 0.05가 두
-                # 상황을 모두 만족하는 안전한 값이었다(정상 케이스 겹침 0.17 vs 오검출
-                # 케이스 겹침 0.003, 임계값 0.01과 충분한 여유 확보).
-                touched_local = _assembly_touching_spaces(local_union, space_items,
-                                                           adjacency_tol=0.05, min_area=0.01)
-                if len(touched_local) < 2:
-                    continue
-
-                reason = (f'조립체 병합(국소구간) 판정: 이 벽이 {s.Name or s.GlobalId}과(와) 접하는 '
-                          f'국소 구간을 인접 레이어와 묶어 확인한 결과, 서로 다른 공간 '
-                          f'{len(touched_local)}개와 접함을 확인')
-                result[key] = ('내벽', reason)
+            reason = (f'조립체 병합 판정: 인접 레이어 {len(asm["guids"])}개를 하나의 벽체로 묶어 '
+                      f'서로 다른 공간 {len(touched)}개와 접함을 확인')
+            for w_guid in asm['guids']:
                 if result.get(w_guid, ('', ''))[0] != '내벽':
                     result[w_guid] = ('내벽', reason)
-
-                # 같은 국소 구간(local_window)에 겹치는 조립체의 다른 멤버(예: RelSpaceBoundary가
-                # 아예 없는 코어층)도 물리적으로 같은 위치이므로 함께 내벽으로 승격
-                for other_guid in asm['guids']:
-                    if other_guid == w_guid:
-                        continue
-                    other_fp = fp_by_guid.get(other_guid)
-                    if other_fp is None or other_fp.is_empty:
-                        continue
-                    if other_fp.buffer(0.05).intersects(local_window):
-                        if result.get(other_guid, ('', ''))[0] != '내벽':
-                            result[other_guid] = ('내벽', reason + ' (동일 국소구간의 조립체 멤버)')
-
-    # 6. [재집계] 5단계에서 일부 pair만 국소적으로 '내벽'으로 갱신되었을 수 있으므로,
-    #    전체 GlobalId 대표 라벨(혼합 포함)을 pair 결과 기준으로 다시 계산한다.
-    for w_guid, spaces in wall_space_map.items():
-        internal_cnt = sum(1 for s in spaces if result.get((w_guid, s.GlobalId), ('', ''))[0] == '내벽')
-        external_cnt = sum(1 for s in spaces if result.get((w_guid, s.GlobalId), ('', ''))[0] in ('외벽', '외벽(추정)'))
-
-        if internal_cnt > 0 and external_cnt > 0:
-            result[w_guid] = ('혼합(내/외벽 복합)', '분할 조각 중 내벽과 외벽 속성 혼재(조립체 병합 국소판정 반영)')
-        elif internal_cnt > 0:
-            result[w_guid] = ('내벽', '모든 분할 조각이 내벽으로 판정됨(조립체 병합 국소판정 반영)')
-        elif external_cnt > 0:
-            result[w_guid] = ('외벽', '모든 분할 조각이 외벽으로 판정됨(조립체 병합 국소판정 반영)')
-        # else: 관계 자체가 없던 벽(예: 코어)의 whole-wall 라벨은 5단계에서 이미 결정된 값을 유지
+                for s in wall_space_map.get(w_guid, []):
+                    key = (w_guid, s.GlobalId)
+                    if result.get(key, ('', ''))[0] != '내벽':
+                        result[key] = ('내벽', reason)
 
     return result
 
