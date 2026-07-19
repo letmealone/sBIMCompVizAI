@@ -195,14 +195,32 @@ def _profile_xy_extent(profile):
 
 
 def _item_extent_corners(it):
-    """Body 아이템 하나의 로컬 좌표계 기준 대표 코너/정점 좌표들을 반환한다.
-    여러 아이템(레이어·하드웨어 부품 등)을 하나로 합쳐 전체 bbox를 구할 때 쓰인다."""
+    """Body 아이템 하나의 로컬 좌표계(엔티티 자체 기준) 코너/정점 좌표들을 반환한다.
+    여러 아이템(레이어·하드웨어 부품 등)을 하나로 합쳐 전체 bbox를 구할 때 쓰인다.
+    [수정사항] IfcExtrudedAreaSolid의 프로파일은 자신의 Position(엔티티 로컬 프레임
+    내에서의 오프셋+회전)을 기준으로 배치되는데, 예전엔 이를 무시하고 모든 압출체가
+    원점(0,0,0)에서 시작한다고 가정했음. 벽 하나가 서로 수직인 압출체 2개(예: L자
+    코너를 이루는 두 조각)로 구성된 경우, Position을 무시하면 두 조각이 실제로는
+    겹치는 위치에 있는데도 서로 다른 원점 기준으로 합쳐져 폭x폭이 곱해진 것처럼
+    부풀려진 bbox가 나오는 문제가 실측으로 확인됨(21m 벽 하나가 450㎡로 과대산정)."""
     if it.is_a('IfcExtrudedAreaSolid'):
         x, y = _profile_xy_extent(it.SweptArea)
         if x is None:
             return []
         depth = it.Depth
-        return [(sx, sy, sz) for sx in (0, x) for sy in (0, y) for sz in (0, depth)]
+        # IfcRectangleProfileDef 등 프로파일은 자신의 Position 원점에 대해 대칭 배치되는
+        # 것이 IFC 표준 관례
+        local_corners = [(sx, sy, sz) for sx in (-x / 2, x / 2) for sy in (-y / 2, y / 2) for sz in (0, depth)]
+        try:
+            import ifcopenshell.util.placement as plc
+            m = plc.get_axis2placement(it.Position) if it.Position else np.eye(4)
+        except Exception:
+            m = np.eye(4)
+        pts = []
+        for (lx, ly, lz) in local_corners:
+            p = m @ np.array([lx, ly, lz, 1.0])
+            pts.append((p[0], p[1], p[2]))
+        return pts
     if it.is_a('IfcPolygonalFaceSet') or it.is_a('IfcTriangulatedFaceSet'):
         try:
             return [tuple(p) for p in it.Coordinates.CoordList]

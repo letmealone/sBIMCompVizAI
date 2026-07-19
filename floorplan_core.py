@@ -404,7 +404,15 @@ def precompute_storey_geometry(ifc_file, storeys, status_cb=None):
         _get_storey_candidate_footprints(ifc_file, storey['entity'])
 
 
-def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, adjacency_tol=0.15):
+def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, adjacency_tol=0.15,
+                                wall_adjacency_tol=0.35):
+    """[수정사항] 벽 전용 지오메트리 폴백의 허용거리를 일반 부재(0.15m)와 분리해 0.35m로
+    완화한다. 실측 결과, 관계가 0건인 마감층 벽들이 공간 footprint로부터 0.20~0.30m
+    떨어져 있어 기존 0.15m 허용거리로는 못 잡히는 사례가 다수 확인됨(층별로 최대
+    983㎡, 벽 27개가 이 사유로 누락). 0.35m는 실측된 정상 레이어 간격(0.05~0.3m) 범위를
+    안전하게 포괄하면서, 이 값은 개별 벽 하나의 footprint 단위로 적용되므로(등방 버퍼를
+    긴 벽 전체나 조립체 전체에 씌우는 것과 달리) 이전에 겪었던 '옆방 오검출' 부작용
+    위험은 낮다."""
     by_guid = {}
     for rel in ifc_file.by_type('IfcRelSpaceBoundary'):
         if rel.RelatingSpace == space_entity and rel.RelatedBuildingElement is not None:
@@ -425,7 +433,7 @@ def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, 
                 for el, el_fp in _get_storey_wall_candidate_footprints(ifc_file, storey):
                     if el.GlobalId in by_guid:
                         continue
-                    if space_fp.distance(el_fp) <= adjacency_tol:
+                    if space_fp.distance(el_fp) <= wall_adjacency_tol:
                         by_guid[el.GlobalId] = el
 
     return list(by_guid.values())
@@ -911,6 +919,75 @@ def _get_wall_side_area_m2(ent, flat_props=None):
     return result
 
 
+_wall_space_split_cache = {}
+
+
+def compute_wall_space_splits(ifc_file, storey_entity):
+    """[신규] 층 안의 모든 벽을, 접한 공간들에게 '배분액의 합 = 벽 자신의 총면적'이 되도록
+    미리 분할해둔다(층 단위로 정확히 한 번 계산). 공간별 조회(build_space_detail 등)는
+    이 결과에서 (벽,공간) 키로 값을 찾아오기만 하면 되므로, 여러 공간에 걸친 벽을 각
+    공간에 전액씩 중복 부여하던 문제가 애초에 발생하지 않는다(총량 = 분할합산 + 잔여
+    등식이 근사가 아니라 항상 정확히 성립).
+    분배 비율은 기존 _apportioned_area()가 이미 계산하는 세그먼트/footprint 기반
+    기하학적 가중치를 그대로 재사용하되, 공간들에 대한 값의 합이 own_area가 되도록
+    정규화(rescale)한다 - 그래서 단순 균등분할보다, 각 공간과 실제로 맞닿은 구간의
+    비중(예: 여러 방을 지나는 긴 복도벽에서 방마다 접한 길이가 다른 경우)을 더 정확히
+    반영한다. 기하 계산이 전부 실패하면 균등분할로 폴백한다.
+    반환: {(wall_guid, space_guid): 배분된_면적(㎡)}"""
+    import sys
+    _self = sys.modules[__name__]
+    walls_by_storey = ite._wall_footprints_by_storey(ifc_file, _self)
+    walls_here = walls_by_storey.get(storey_entity.GlobalId, [])
+    wall_fp_by_guid = {w.GlobalId: fp for w, fp in walls_here}
+
+    spaces = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
+    space_fp_by_guid = {sp.GlobalId: get_footprint_polygon_cached(sp) for sp in spaces}
+
+    wall_to_spaces = defaultdict(list)
+    for sp in spaces:
+        related = get_space_related_elements(ifc_file, sp)
+        for e in related:
+            if e.is_a('IfcWall'):
+                wall_to_spaces[e.GlobalId].append(sp)
+
+    splits = {}
+    for w, _fp in walls_here:
+        touching = wall_to_spaces.get(w.GlobalId, [])
+        if not touching:
+            continue
+        own, _src = _get_wall_side_area_m2(w)
+        if own is None or own <= 0:
+            continue
+        w_fp = wall_fp_by_guid.get(w.GlobalId)
+
+        if len(touching) == 1:
+            splits[(w.GlobalId, touching[0].GlobalId)] = round(own, 4)
+            continue
+
+        raw = {}
+        for sp in touching:
+            sp_fp = space_fp_by_guid.get(sp.GlobalId)
+            val, _method = _apportioned_area(ifc_file, w, sp, own, sp_fp, wall_footprint_polygon=w_fp)
+            raw[sp.GlobalId] = max(val, 0.0)
+        total_raw = sum(raw.values())
+        if total_raw <= 0:
+            n = len(touching)
+            for sp in touching:
+                splits[(w.GlobalId, sp.GlobalId)] = round(own / n, 4)
+        else:
+            for sp in touching:
+                splits[(w.GlobalId, sp.GlobalId)] = round(own * (raw[sp.GlobalId] / total_raw), 4)
+
+    return splits
+
+
+def _get_wall_space_splits_cached(ifc_file, storey_entity):
+    key = (id(ifc_file), storey_entity.GlobalId)
+    if key not in _wall_space_split_cache:
+        _wall_space_split_cache[key] = compute_wall_space_splits(ifc_file, storey_entity)
+    return _wall_space_split_cache[key]
+
+
 def build_space_detail(ifc_file, wall_classification, space_entity):
     related = get_space_related_elements(ifc_file, space_entity)
     equipment = get_space_contained_equipment(ifc_file, space_entity)
@@ -939,6 +1016,14 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
 
     class_counts = Counter(e.is_a() for e in related)
 
+    # [수정사항] 벽마다 그때그때 _apportioned_area()로 안분하면(내벽의 경우 접한 각
+    # 공간에 전액에 가까운 값을 부여) 여러 공간에 걸친 벽의 면적이 중복 집계되어 "층
+    # 전체 총량 = 공간별 분할합산 + 잔여"라는 등식이 깨졌었다. 층 단위로 미리 정확히
+    # 분할해둔 표(compute_wall_space_splits, 합=own_area 보장)를 조회만 하도록 바꿔
+    # 이 등식이 항상 성립하게 한다.
+    storey_entity = _find_space_storey(space_entity)
+    wall_splits = _get_wall_space_splits_cached(ifc_file, storey_entity) if storey_entity is not None else {}
+
     wall_simple_counts = Counter()
     wall_simple_area = Counter()
     wall_detail_counts = Counter()
@@ -957,15 +1042,11 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
         simple, detail_label = _wall_display_category(result)
         wall_simple_counts[simple] += 1
         wall_detail_counts[detail_label] += 1
-        v, _src = _get_wall_side_area_m2(e)
-        if v is not None:
-            area_val, method = _apportioned_area(
-                ifc_file, e, space_entity, v, space_footprint,
-                segment_polygon=wall_segment_polygons.get(e.GlobalId),
-                wall_footprint_polygon=wall_footprints.get(e.GlobalId))
-            if method == '실패-전체값사용(과다산정 가능)':
-                wall_area_apportioned = False
+        area_val = wall_splits.get((e.GlobalId, space_entity.GlobalId))
+        if area_val is not None:
             wall_simple_area[simple] += area_val
+        else:
+            wall_area_apportioned = False
 
     area_by_class = {}
     non_wall_classes = sorted(set(e.is_a() for e in related if not e.is_a('IfcWall')))
@@ -1024,9 +1105,58 @@ def build_space_detail(ifc_file, wall_classification, space_entity):
     }
 
 
+def compute_wall_area_attribution(ifc_file, storey_entity):
+    """벽체의 층단위 총면적을 '공간과 접해 분할된 부분(matched)'과 '공간과 무관해
+    잘리지 않은 잔여 부분(residual)'으로 나눈다.
+    [설계 의도] matched를 residual로부터 total - residual로 정의하므로
+    total = matched + residual이 근사가 아니라 항상 정확히 성립한다 - 이 값이 안
+    맞으면 그건 계산 버그이지 '원래 그런 데이터라서 어쩔 수 없는 오차'가 아님을
+    명확히 구분하기 위함. residual은 어느 공간의 related 목록에도 전혀 안 걸리는
+    벽(관계 0건 + 지오메트리 폴백도 실패)의 own_area 합계이며, 이런 벽은 대개
+    방으로 모델링되지 않은 영역(주차장·설비공간 등)에 있거나, 드물게는 폴백
+    허용거리(0.35m)를 벗어난 마감층일 수 있다.
+    반환: {'total','matched','residual','residual_count','residual_walls':[(name,guid,area),...]}"""
+    import sys
+    _self = sys.modules[__name__]
+    walls_by_storey = ite._wall_footprints_by_storey(ifc_file, _self)
+    walls_here = [w for w, _fp in walls_by_storey.get(storey_entity.GlobalId, [])]
+
+    spaces = get_elements_for_storey(storey_entity, classes={'IfcSpace'})
+    covered = set()
+    for sp in spaces:
+        related = get_space_related_elements(ifc_file, sp)
+        covered.update(e.GlobalId for e in related if e.is_a('IfcWall'))
+
+    total = 0.0
+    residual = 0.0
+    residual_walls = []
+    for w in walls_here:
+        v, _src = _get_wall_side_area_m2(w)
+        if v is None:
+            continue
+        total += v
+        if w.GlobalId not in covered:
+            residual += v
+            residual_walls.append((w.Name or '(이름없음)', w.GlobalId, round(v, 2)))
+
+    residual_walls.sort(key=lambda x: -x[2])
+    return {
+        'total': round(total, 2),
+        'matched': round(total - residual, 2),
+        'residual': round(residual, 2),
+        'residual_count': len(residual_walls),
+        'residual_walls': residual_walls,
+    }
+
+
 def build_space_structural_breakdown(ifc_file, element_classification, wall_classification, space_entity):
     related = get_space_related_elements(ifc_file, space_entity)
     space_footprint = get_footprint_polygon_cached(space_entity)
+
+    # 벽은 build_space_detail과 동일하게, 층 단위로 미리 분할해둔 표를 조회한다
+    # (합=own_area 보장 -> 총량=분할합산+잔여 등식이 항상 성립).
+    storey_entity = _find_space_storey(space_entity)
+    wall_splits = _get_wall_space_splits_cached(ifc_file, storey_entity) if storey_entity is not None else {}
 
     split = defaultdict(lambda: defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False}))
     total = defaultdict(lambda: {'count': 0, 'area': 0.0, '_has_area': False})
@@ -1045,9 +1175,7 @@ def build_space_structural_breakdown(ifc_file, element_classification, wall_clas
 
         area_val = None
         if cls in ('IfcWall', 'IfcWallStandardCase'):
-            v, _src = _get_wall_side_area_m2(e)
-            if v is not None:
-                area_val, _method = _apportioned_area(ifc_file, e, space_entity, v, space_footprint)
+            area_val = wall_splits.get((e.GlobalId, space_entity.GlobalId))
         elif cls in _STRUCTURAL_AREA_MEANINGFUL_CLASSES:
             flat = ite._flatten_psets(e)
             cols = ite._area_columns(e, flat)

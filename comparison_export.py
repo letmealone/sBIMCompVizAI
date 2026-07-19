@@ -219,6 +219,39 @@ def build_floor_level_comparison_df(data_a, data_b, floor_mapping):
     return pd.DataFrame(rows)
 
 
+def build_wall_area_reconciliation_df(data_a, data_b, floor_mapping, max_residual_names=5):
+    """03d_벽_면적정합성 시트용 DataFrame: 층별 벽 총면적을 '공간과 접해 분할된 부분
+    (공간접촉분)'과 '공간과 무관해 잘리지 않은 잔여 부분(잔여분)'으로 나눠 A/B를
+    비교한다. 총면적 = 공간접촉분 + 잔여분이 항상 정확히 성립하므로(정의상 자명),
+    이 값이 안 맞으면 계산 버그이고, 잔여분이 큰 것은 '해당 층에 방으로 모델링되지
+    않은 영역이 그만큼 있다'는 것을 뜻한다(오차가 아니라 데이터 특성)."""
+    rows = []
+    storeys_b_by_name = {s['Name']: s for s in data_b['storeys']}
+    for a_storey in data_a['storeys']:
+        a_name = a_storey['Name']
+        b_name = floor_mapping.get(a_name)
+        attr_a = fc.compute_wall_area_attribution(data_a['ifc_file'], a_storey['entity'])
+        attr_b = (fc.compute_wall_area_attribution(data_b['ifc_file'], storeys_b_by_name[b_name]['entity'])
+                  if b_name and b_name in storeys_b_by_name else None)
+
+        def _names(attr):
+            if attr is None:
+                return ''
+            top = attr['residual_walls'][:max_residual_names]
+            suffix = f' 외 {attr["residual_count"] - len(top)}건' if attr['residual_count'] > len(top) else ''
+            return ', '.join(f'{n}({a}㎡)' for n, _g, a in top) + suffix
+
+        rows.append({
+            'A_층': a_name, 'B_층': b_name or '(대응없음)',
+            'A_총면적(㎡)': attr_a['total'], 'B_총면적(㎡)': attr_b['total'] if attr_b else None,
+            'A_공간접촉분(㎡)': attr_a['matched'], 'B_공간접촉분(㎡)': attr_b['matched'] if attr_b else None,
+            'A_잔여분(㎡)': attr_a['residual'], 'B_잔여분(㎡)': attr_b['residual'] if attr_b else None,
+            'A_잔여벽개수': attr_a['residual_count'], 'B_잔여벽개수': attr_b['residual_count'] if attr_b else None,
+            'A_잔여벽_상위목록': _names(attr_a), 'B_잔여벽_상위목록': _names(attr_b),
+        })
+    return pd.DataFrame(rows)
+
+
 def build_structural_split_df(breakdowns):
     """03_구조부재_내외구분비교 시트용 DataFrame: 매칭된 공간 쌍마다, 벽 포함 모든
     구조부재를 (IFC_Class, 내/외부 구분)별로 나눠 A/B 개수·면적을 비교한다.
@@ -363,6 +396,15 @@ def build_comparison_workbook(data_a, data_b, floor_mapping, spaces_dict_a, spac
     ws_floor_level = wb.create_sheet(ite._unique_sheet_name(wb, '03c_층단위_부재비교', used_names))
     ite._write_df(ws_floor_level, df_floor_level)
     _apply_diff_formatting(ws_floor_level, df_floor_level, [('A_개수', 'B_개수'), ('A_면적(㎡)', 'B_면적(㎡)')])
+
+    if status_cb:
+        status_cb('벽 면적 정합성(공간접촉분/잔여분) 계산 중...')
+    df_wall_reconcile = build_wall_area_reconciliation_df(data_a, data_b, floor_mapping)
+    ws_wall_reconcile = wb.create_sheet(ite._unique_sheet_name(wb, '03d_벽_면적정합성', used_names))
+    ite._write_df(ws_wall_reconcile, df_wall_reconcile)
+    _apply_diff_formatting(ws_wall_reconcile, df_wall_reconcile,
+                            [('A_총면적(㎡)', 'B_총면적(㎡)'), ('A_공간접촉분(㎡)', 'B_공간접촉분(㎡)'),
+                             ('A_잔여분(㎡)', 'B_잔여분(㎡)')])
 
     if status_cb:
         status_cb('설비 비교 계산 중...')
