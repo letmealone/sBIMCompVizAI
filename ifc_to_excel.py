@@ -7,8 +7,6 @@ ifc_to_excel.py
 행렬(엔티티 x 속성) 구조의 엑셀 파일로 자동 추출하는 모듈.
 """
 
-import sys
-import argparse
 import json
 import math
 import re
@@ -773,115 +771,6 @@ def _build_wall_classification_sheet(ifc_file, wall_classification=None):
 
 
 # ===================================================================
-# 3-2c. IFC4 명명규칙(표준 의도) 진단 - NVIDIA NIM LLM 이용 (선택 기능)
-# ===================================================================
-
-IFC4_NAMING_DIAGNOSIS_PROMPT = """당신은 IFC4(buildingSMART 표준) 스키마에 정통한 BIM 검토 전문가입니다.
-아래는 어떤 IFC 모델에서 추출한 (IFC 엔티티 클래스, Name 속성) 조합 목록입니다.
-각 조합에 대해 Name이 IFC4 표준이 의도하는 해당 엔티티 클래스의 의미
-(예: IfcWall=벽, IfcSlab=바닥/슬래브, IfcColumn=기둥, IfcBeam=보, IfcDoor=문, IfcWindow=창 등)와
-명백히 모순되는지만 판단하세요.
-
-판정 기준:
-- 사내 코드/도면 표기 관행(예: 'W6_200', 'RW4_400', 'C1', 'B12' 같은 임의 기호)은 표준에 규정된 바가
-  없으므로 그 자체로는 '정상'으로 처리하세요.
-- Name이 명백히 다른 부재 종류를 가리키는 경우만(예: IfcWall인데 Name에 '바닥'/'Slab'/'지붕' 등이 포함,
-  혹은 IfcDoor인데 Name에 '창'/'Window'가 포함) '의심'으로 표시하세요.
-- 판단 근거가 부족하면 '판단보류'로 표시하세요.
-
-조합 목록:
-{combo_list}
-
-반드시 아래 JSON 배열 형식으로만 답하라. 다른 텍스트나 코드블록 표시(```)를 포함하지 마라.
-[{{"class": "<IFC_Class>", "name": "<Name>", "판정": "정상|의심|판단보류", "사유": "<한 줄 근거>"}}, ...]
-"""
-
-
-def make_nim_llm_call(api_key, model="meta/llama-3.1-70b-instruct"):
-    import os
-    import httpx
-    from openai import OpenAI
-    tls_verify = os.environ.get("NIM_TLS_VERIFY", "true").lower() != "false"
-    client = OpenAI(base_url="[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)", api_key=api_key,
-                     http_client=httpx.Client(verify=tls_verify))
-
-    def _call(prompt: str) -> str:
-        resp = client.chat.completions.create(
-            model=model, temperature=0.0,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.choices[0].message.content
-    return _call
-
-
-def _collect_class_name_combos(ifc_file, target_classes=None):
-    combos = OrderedDict()
-    for e in ifc_file.by_type('IfcElement'):
-        cls = e.is_a()
-        if target_classes and cls not in target_classes:
-            continue
-        name = _safe_attr(e, 'Name') or '(이름없음)'
-        key = (cls, name)
-        if key not in combos:
-            combos[key] = {'count': 0, 'sample_guid': e.GlobalId}
-        combos[key]['count'] += 1
-    return combos
-
-
-def _parse_llm_json(raw):
-    cleaned = raw.strip()
-    if cleaned.startswith('```'):
-        cleaned = cleaned.strip('`')
-        if cleaned.lower().startswith('json'):
-            cleaned = cleaned[4:]
-    return json.loads(cleaned)
-
-
-def run_ifc4_naming_diagnosis(ifc_file, llm_call, target_classes=None, batch_size=40, status_cb=None):
-    combos = _collect_class_name_combos(ifc_file, target_classes)
-    keys = list(combos.keys())
-    results = {}
-
-    if status_cb:
-        status_cb(f"IFC4 명명규칙 진단 시작: 고유 (클래스,이름) 조합 {len(keys)}개, "
-                   f"배치크기 {batch_size} -> 약 {(len(keys) + batch_size - 1) // batch_size}회 LLM 호출 예정")
-
-    for i in range(0, len(keys), batch_size):
-        chunk = keys[i:i + batch_size]
-        combo_list = "\n".join(f"- class: {c}, name: {n}" for c, n in chunk)
-        prompt = IFC4_NAMING_DIAGNOSIS_PROMPT.format(combo_list=combo_list)
-        try:
-            raw = llm_call(prompt)
-            parsed = _parse_llm_json(raw)
-            for item in parsed:
-                key = (item.get('class'), item.get('name'))
-                results[key] = (item.get('판정', '판단보류'), item.get('사유', ''))
-        except Exception as e:
-            for key in chunk:
-                results[key] = ('판단불가', f'LLM 호출/응답 파싱 실패: {e}')
-            if status_cb and 'connection' in str(e).lower() and i == 0:
-                status_cb("[힌트] 'Connection error'는 대부분 사내망/프록시가 NVIDIA API로의 "
-                           "TLS 연결을 가로막는 경우입니다. NIM_TLS_VERIFY=false 환경변수를 설정해보세요.")
-        if status_cb:
-            status_cb(f"IFC4 명명규칙 진단: {min(i + batch_size, len(keys))}/{len(keys)} 조합 처리 완료")
-
-    rows = []
-    for (cls, name), info in combos.items():
-        판정, 사유 = results.get((cls, name), ('판단불가', 'LLM 처리 안됨'))
-        rows.append({
-            'IFC_Class': cls, 'Name': name,
-            '인스턴스_개수': info['count'], '샘플_GlobalId': info['sample_guid'],
-            '판정(LLM추론)': 판정, '판정근거': 사유,
-        })
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        order = {'의심': 0, '판단보류': 1, '판단불가': 2, '정상': 3}
-        df['_sort'] = df['판정(LLM추론)'].map(order).fillna(9)
-        df = df.sort_values(['_sort', 'IFC_Class', 'Name']).drop(columns='_sort').reset_index(drop=True)
-    return df
-
-
-# ===================================================================
 # 3-3. 공간(Space)에 매칭되지 않은 부재 시트
 # ===================================================================
 
@@ -1361,8 +1250,6 @@ def _unique_sheet_name(wb, name, used):
 def extract_ifc_to_excel(ifc_path: str, output_path: str = None, include_long: bool = True,
                           consolidated: bool = True, per_class_wide: bool = True,
                           space_element_matrix: bool = True, spec_path: str = None,
-                          naming_diagnosis: bool = False, naming_diagnosis_classes=None,
-                          nvidia_api_key: str = None, nvidia_model: str = "meta/llama-3.1-70b-instruct",
                           status_cb=None) -> str:
     if output_path is None:
         output_path = ifc_path.rsplit('.', 1)[0] + '_추출.xlsx'
@@ -1424,20 +1311,5 @@ def extract_ifc_to_excel(ifc_path: str, output_path: str = None, include_long: b
             ws = wb.create_sheet(_unique_sheet_name(wb, sheet_label, used_names))
             _write_df(ws, df)
 
-    if naming_diagnosis:
-        if not nvidia_api_key:
-            pass
-        else:
-            llm_call = make_nim_llm_call(api_key=nvidia_api_key, model=nvidia_model)
-            df_diag = run_ifc4_naming_diagnosis(
-                ifc_file, llm_call, target_classes=naming_diagnosis_classes, status_cb=status_cb
-            )
-            ws = wb.create_sheet(_unique_sheet_name(wb, '08_IFC4_명명규칙_진단', used_names))
-            _write_df(ws, df_diag)
-
     wb.save(output_path)
     return output_path
-
-
-if __name__ == '__main__':
-    main()
