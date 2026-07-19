@@ -451,6 +451,43 @@ def _render_union_table(title, left_d, right_d, label_left, label_right,
     st.table(table)
 
 
+def _render_floor_level_comparison(data_a, data_b, storey_a_name, storey_b_name,
+                                    label_left='전문가', label_right='AI'):
+    """공간이나 범례 버튼을 아무것도 선택하지 않은 '평상시' 상태에서, 현재 매칭된 층
+    쌍에 대해 공간 매칭과 무관한 층 전체 기준 부재 개수/면적 비교를 보여준다
+    (엑셀의 03c_층단위_부재비교 시트와 동일한 집계 로직을 재사용)."""
+    storey_a = next((s for s in data_a['storeys'] if s['Name'] == storey_a_name), None) if storey_a_name else None
+    storey_b = next((s for s in data_b['storeys'] if s['Name'] == storey_b_name), None) if storey_b_name else None
+    if storey_a is None and storey_b is None:
+        return
+
+    st.markdown('---')
+    st.markdown('## 🧱 층 단위 부재 비교 (공간 선택 전 기본 화면)')
+    st.caption(
+        '공간을 클릭하거나 범례 버튼을 누르면 그에 맞는 상세 비교로 바뀝니다. 아래는 그 전까지 '
+        '기본으로 보여주는, 이 층에 배치된 부재 전체를 클래스별로 집계한 결과입니다(공간 매칭과 '
+        '무관 - 내벽은 층 전체 기준 1회만 집계되므로, 공간별 비교에서 보이는 값과는 다를 수 있습니다).'
+    )
+
+    with st.spinner('층 단위 부재 집계 중...'):
+        summary_a = cmpexp._floor_class_summary(data_a['ifc_file'], storey_a) if storey_a is not None else {}
+        summary_b = cmpexp._floor_class_summary(data_b['ifc_file'], storey_b) if storey_b is not None else {}
+
+    counts_a = {k: v['count'] for k, v in summary_a.items()}
+    counts_b = {k: v['count'] for k, v in summary_b.items()}
+    areas_a = {k: v['area'] for k, v in summary_a.items() if v.get('area') is not None}
+    areas_b = {k: v['area'] for k, v in summary_b.items() if v.get('area') is not None}
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**{label_left}**: {storey_a_name or '(대응 없음)'}")
+    with c2:
+        st.markdown(f"**{label_right}**: {storey_b_name or '(대응 없음)'}")
+
+    _render_union_table('클래스별 개수/면적(㎡)', counts_a, counts_b, label_left, label_right,
+                         extra_left=areas_a, extra_right=areas_b, extra_label='면적(㎡)')
+
+
 def _render_comparison_tables(detail_left, detail_right, label_left='전문가', label_right='AI'):
     if detail_left is None and detail_right is None:
         return
@@ -822,6 +859,10 @@ if file_a and file_b:
         st.rerun()  # 하이라이트/자동매핑 반영을 위해 갱신된 session_state로 즉시 재실행
 
     _render_comparison_tables(detail_left, detail_right, '전문가', 'AI')
+
+    floor_categories_active = bool(st.session_state.get('floor_highlight_categories'))
+    if detail_left is None and detail_right is None and not floor_categories_active:
+        _render_floor_level_comparison(data_a, data_b, selected_a_name, selected_b_name, '전문가', 'AI')
 
 else:
     st.info('좌측/우측에 전문가 IFC와 AI 생성 IFC를 각각 업로드해주세요.')
