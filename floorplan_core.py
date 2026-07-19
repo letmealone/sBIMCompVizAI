@@ -430,9 +430,19 @@ def get_space_related_elements(ifc_file, space_entity, geometric_fallback=True, 
                     if space_fp.distance(el_fp) <= adjacency_tol:
                         by_guid[el.GlobalId] = el
                 # 벽 전용 폴백 (기존에는 벽이 이 지오메트리 폴백 대상에서 전부 빠져있었음)
+                # [수정사항] 이미 다른 공간과 RelSpaceBoundary 관계를 맺고 있는 벽(예: 옆방
+                # 경계벽)까지, 단순히 이 공간과 거리가 가깝다는 이유만으로 끼워넣으면:
+                # (1) 그 벽엔 '이 공간'과의 ConnectionGeometry가 없어 세그먼트 클리핑이
+                # 실패하고 벽 전체가 통째로 표시되며('덜 잘리는' 현상으로 실측 확인됨),
+                # (2) 면적도 이미 다른 공간에 정당하게 귀속된 벽이 또 끼어들어 중복 소지가
+                # 생긴다. 따라서 지오메트리 폴백은 '이 벽이 어디에도(다른 공간 포함)
+                # RelSpaceBoundary 관계가 전혀 없는 경우'에만 적용한다.
+                boundary_index = _get_boundary_index(ifc_file)
                 for el, el_fp in _get_storey_wall_candidate_footprints(ifc_file, storey):
                     if el.GlobalId in by_guid:
                         continue
+                    if boundary_index.get(el.GlobalId):
+                        continue  # 이미 어딘가(다른 공간 포함)에 관계가 있으면 지오메트리 폴백 대상에서 제외
                     if space_fp.distance(el_fp) <= wall_adjacency_tol:
                         by_guid[el.GlobalId] = el
 
