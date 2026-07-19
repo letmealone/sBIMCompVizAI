@@ -517,6 +517,128 @@ AREA_TARGET_CLASSES = {'IfcRoof', 'IfcCovering', 'IfcSlab', 'IfcDoor', 'IfcWindo
 # 3-1b. 벽 내/외벽 판정 및 검증 로직 개선 (선 분할 후 판정 방식)
 # ===================================================================
 
+# ===================================================================
+# 3-1b. 벽 조립체(레이어 병합) 그룹핑 — 재료 레이어별로 분리 모델링된 벽 보정
+# ===================================================================
+# 마감(석고보드)+코어(콘크리트/조적)+마감(몰탈) 등으로 벽 하나가 여러 IfcWall
+# 엔티티로 나뉘어 모델링된 경우, 개별 레이어는 한쪽 공간에만 RelSpaceBoundary가
+# 있거나(마감층) 아예 관계가 없어(코어) 기존 로직에서 '외벽'/'판정불가'로 오판될 수
+# 있다. 같은 층에서 서로 평행하고 근접(gap_tol 이내)하며 겹치는 벽들을 하나의
+# '조립체'로 묶어, 조립체 전체 기준으로 내/외부를 재판정한다.
+
+def _wall_footprints_by_storey(ifc_file, fc):
+    by_storey = defaultdict(list)
+    seen = set()
+    walls = list(ifc_file.by_type('IfcWall'))
+    for w in walls:
+        if w.GlobalId in seen:
+            continue
+        seen.add(w.GlobalId)
+        st = _get_storey(w)
+        if st is None:
+            continue
+        fp = fc.get_footprint_polygon(w)
+        if fp is None or fp.is_empty:
+            continue
+        by_storey[st.GlobalId].append((w, fp))
+    return by_storey
+
+
+def _edges_parallel_overlap(edges1, edges2, max_gap, min_overlap, angle_tol=0.05):
+    """두 벽의 외곽선 edge 쌍 중, 서로 평행(각도오차 angle_tol 이내)하고 수직간격이
+    max_gap 이내이며 겹치는 구간 길이가 min_overlap 이상인 조합이 하나라도 있으면 True
+    (같은 벽 조립체를 이루는 레이어 관계로 판단)."""
+    for (p1, p2) in edges1:
+        d1 = np.array([p2[0] - p1[0], p2[1] - p1[1]])
+        len1 = np.linalg.norm(d1)
+        if len1 < 1e-6:
+            continue
+        d1n = d1 / len1
+        for (q1, q2) in edges2:
+            d2 = np.array([q2[0] - q1[0], q2[1] - q1[1]])
+            len2 = np.linalg.norm(d2)
+            if len2 < 1e-6:
+                continue
+            d2n = d2 / len2
+            cross = abs(d1n[0] * d2n[1] - d1n[1] * d2n[0])
+            if cross > angle_tol:
+                continue
+            v = np.array([q1[0] - p1[0], q1[1] - p1[1]])
+            perp = abs(v[0] * d1n[1] - v[1] * d1n[0])
+            if perp > max_gap:
+                continue
+            t_q1 = (q1[0] - p1[0]) * d1n[0] + (q1[1] - p1[1]) * d1n[1]
+            t_q2 = (q2[0] - p1[0]) * d1n[0] + (q2[1] - p1[1]) * d1n[1]
+            t_min = max(0.0, min(t_q1, t_q2))
+            t_max = min(len1, max(t_q1, t_q2))
+            if t_max - t_min >= min_overlap:
+                return True
+    return False
+
+
+def _group_wall_assemblies(walls_fp, fc, max_gap=0.15, min_overlap=0.3):
+    """같은 층 벽들(walls_fp: [(entity, polygon), ...])을 평행+근접+겹침 기준으로
+    Union-Find 그룹핑해 물리적으로 하나의 벽체를 이루는 재료 레이어 묶음을 찾는다.
+    반환: [{'guids': set(...), 'union': polygon}, ...] (레이어 1개짜리 그룹도 포함)"""
+    n = len(walls_fp)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    edges_cache = [fc._polygon_edges(fp) for _, fp in walls_fp]
+    bounds = [fp.bounds for _, fp in walls_fp]
+
+    for i in range(n):
+        bi = bounds[i]
+        for j in range(i + 1, n):
+            if find(i) == find(j):
+                continue
+            bj = bounds[j]
+            if (bi[2] + max_gap < bj[0] or bj[2] + max_gap < bi[0] or
+                    bi[3] + max_gap < bj[1] or bj[3] + max_gap < bi[1]):
+                continue  # 바운딩박스 broad-phase: 겹칠 가능성 없으면 스킵
+            if _edges_parallel_overlap(edges_cache[i], edges_cache[j], max_gap, min_overlap):
+                union(i, j)
+
+    groups = defaultdict(list)
+    for idx in range(n):
+        groups[find(idx)].append(idx)
+
+    from shapely.ops import unary_union
+    result = []
+    for idxs in groups.values():
+        guids = {walls_fp[i][0].GlobalId for i in idxs}
+        polys = [walls_fp[i][1] for i in idxs]
+        try:
+            u = unary_union(polys) if len(polys) > 1 else polys[0]
+        except Exception:
+            u = polys[0]
+        result.append({'guids': guids, 'union': u})
+    return result
+
+
+def _assembly_touching_spaces(union_poly, space_items, adjacency_tol=0.15, min_area=0.01):
+    """조립체 union polygon이 실제로(면적 기준) 접하는 공간 GlobalId 집합 반환."""
+    touched = set()
+    buffered = union_poly.buffer(adjacency_tol)
+    for sp_guid, sp_fp in space_items:
+        if not buffered.intersects(sp_fp):
+            continue
+        inter = buffered.intersection(sp_fp)
+        if inter.area > min_area:
+            touched.add(sp_guid)
+    return touched
+
+
 def _determine_wall_classification(ifc_file):
     """
     [수정사항] 선(先) 분할(Segmentation), 후(後) 판정 로직 적용.
@@ -619,7 +741,36 @@ def _determine_wall_classification(ifc_file):
             result[w_guid] = ('외벽', '모든 분할 조각이 외벽으로 판정됨')
         else:
             result[w_guid] = ('판정불가', '근거 없음')
-            
+
+    # 5. [조립체 병합 보정] 재료 레이어별로 분리 모델링된 벽(마감+코어+마감 등)은
+    #    개별 레이어의 RelSpaceBoundary가 한쪽 공간에만 있거나(마감층) 아예 없어(코어)
+    #    위 3~4단계에서 '외벽' 또는 '판정불가'로 오판될 수 있다. 같은 층에서 서로
+    #    평행·근접(0.15m 이내)하며 겹치는 벽들을 하나의 조립체로 묶어, 조립체 전체가
+    #    서로 다른 공간 2개 이상과 접하면 '내벽'으로 승격(보정)한다.
+    walls_by_storey = _wall_footprints_by_storey(ifc_file, fc)
+    for st_guid, walls_fp in walls_by_storey.items():
+        if len(walls_fp) < 2:
+            continue
+        space_items = storey_spaces.get(st_guid, [])
+        if not space_items:
+            continue
+        assemblies = _group_wall_assemblies(walls_fp, fc)
+        for asm in assemblies:
+            if len(asm['guids']) <= 1:
+                continue  # 병합 대상(레이어)이 없으면 기존 판정 그대로 유지
+            touched = _assembly_touching_spaces(asm['union'], space_items)
+            if len(touched) < 2:
+                continue
+            reason = (f'조립체 병합 판정: 인접 레이어 {len(asm["guids"])}개를 하나의 벽체로 묶어 '
+                      f'서로 다른 공간 {len(touched)}개와 접함을 확인')
+            for w_guid in asm['guids']:
+                if result.get(w_guid, ('', ''))[0] != '내벽':
+                    result[w_guid] = ('내벽', reason)
+                for s in wall_space_map.get(w_guid, []):
+                    key = (w_guid, s.GlobalId)
+                    if result.get(key, ('', ''))[0] != '내벽':
+                        result[key] = ('내벽', reason)
+
     return result
 
 
