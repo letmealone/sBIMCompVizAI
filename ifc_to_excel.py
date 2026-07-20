@@ -792,7 +792,7 @@ def _assembly_length_m(union_footprint):
             return None
 
 
-def _group_wall_assemblies(walls_fp, fc, max_gap=0.1, min_overlap_abs=0.3, min_overlap_ratio=0.6):
+def _group_wall_assemblies(walls_fp, fc, max_gap=0.15, min_overlap_abs=0.3, min_overlap_ratio=0.6):
     """같은 층 벽들(walls_fp: [(entity, polygon), ...])을 평행+근접+겹침 기준으로
     Union-Find 그룹핑해 물리적으로 하나의 벽체를 이루는 재료 레이어 묶음을 찾는다.
 
@@ -804,8 +804,11 @@ def _group_wall_assemblies(walls_fp, fc, max_gap=0.1, min_overlap_abs=0.3, min_o
     겹침 길이가 절대 최소치(min_overlap_abs)를 넘는 것은 물론, 두 벽 중 더 짧은 쪽
     '런 길이'의 min_overlap_ratio(기본 60%) 이상이어야만 매칭으로 인정한다 - 재료
     레이어(마감+코어+마감)는 보통 거의 동일한 길이로 겹쳐 있으므로 이 조건을 만족하지만,
-    우연히 스치듯 근접한 무관한 벽은 비율 조건에서 걸러진다. gap 허용치도 실측 사례
-    (0.05~0.08m)에 맞춰 0.15m -> 0.1m로 좁혔다."""
+    우연히 스치듯 근접한 무관한 벽은 비율 조건에서 걸러진다. gap 허용치는 처음 0.15m ->
+    0.1m로 좁혔다가(당시 실측 사례가 0.05~0.08m였음), 이후 다른 실제 건물에서 마감-구조체
+    간격이 0.13m인 정상 사례가 0.1m 허용치에 걸려 병합 실패하는 게 확인되어(석고보드
+    53㎡ 미병합) 다시 0.15m로 넉넉하게 되돌렸다 - 길이비율(min_overlap_ratio) 안전장치는
+    그대로 유지되므로 과잉병합 위험은 여전히 낮다."""
     n = len(walls_fp)
     parent = list(range(n))
 

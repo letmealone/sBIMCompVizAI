@@ -925,7 +925,16 @@ def _get_wall_side_area_m2(ent, flat_props=None):
     확인됨(1.ifc 18건, 2.ifc 7건). 벽은 일반적 층고 범위(1.5~8m)에 해당하는 값이
     있으면 그것을 높이로 확정하고 나머지 중 가장 큰 값을 폭으로 곱한다(ite._get_wall_
     height_length_mm에 위임 - 조립체 재계산에서도 동일 규칙을 재사용하기 위해 공통
-    함수로 분리함). 문/창호/커튼월은 이 함수를 쓰지 않으므로(별도 경로) 영향 없음."""
+    함수로 분리함). 문/창호/커튼월은 이 함수를 쓰지 않으므로(별도 경로) 영향 없음.
+
+    [수정사항 3] bbox의 '길이'는 사실 벽이 처음부터 끝까지 연속된 판이라는 가정 하에
+    유효한데, 실제로는 양 끝에만 작은 조각 2개가 있고 중간이 완전히 비어있는(즉
+    지오메트리가 불연속인) 벽 엔티티가 실측으로 발견됨(bbox 길이로는 9.5m 연속처럼
+    보였지만 실제 footprint 면적은 0.02㎡에 불과 - 53㎡로 약 2700배 과대산정됨).
+    footprint 폴리곤의 실제 면적을 'bbox 길이 x 최소 합리적 두께(1cm)'와 비교해,
+    이보다도 훨씬 작으면(즉 실제 물질이 그 길이만큼 연속으로 존재하지 않는다는 뜻)
+    bbox 기반 값을 신뢰하지 않고 footprint 면적을 그대로 쓴다(과소평가가 과대평가보다
+    훨씬 안전한 방향이므로)."""
     key = ent.GlobalId
     if key in _wall_side_area_cache:
         return _wall_side_area_cache[key]
@@ -936,7 +945,20 @@ def _get_wall_side_area_m2(ent, flat_props=None):
     else:
         raw_area = height * width
         note = '벽높이인식' if 1500.0 <= height <= 8000.0 else '일반'
-        result = (raw_area * 1e-6, f'폴백-시스템 전체 bounding치수 기반(폭x높이, 두께제외; {note})')
+        area_m2 = raw_area * 1e-6
+
+        try:
+            fp = get_footprint_polygon_cached(ent)
+        except Exception:
+            fp = None
+        if fp is not None and not fp.is_empty and width > 0:
+            length_m = width / 1000.0
+            min_plausible_footprint_area = length_m * 0.01  # 최소 두께 1cm 가정
+            if fp.area < min_plausible_footprint_area:
+                area_m2 = fp.area
+                note = '불연속지오메트리감지-footprint면적대체'
+
+        result = (area_m2, f'폴백-시스템 전체 bounding치수 기반(폭x높이, 두께제외; {note})')
 
     _wall_side_area_cache[key] = result
     return result
