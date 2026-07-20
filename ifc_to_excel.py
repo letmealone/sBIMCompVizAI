@@ -792,7 +792,7 @@ def _assembly_length_m(union_footprint):
             return None
 
 
-def _group_wall_assemblies(walls_fp, fc, max_gap=0.15, min_overlap_abs=0.3, min_overlap_ratio=0.6):
+def _group_wall_assemblies(walls_fp, fc, max_gap=0.30, min_overlap_abs=0.3, min_overlap_ratio=0.6):
     """같은 층 벽들(walls_fp: [(entity, polygon), ...])을 평행+근접+겹침 기준으로
     Union-Find 그룹핑해 물리적으로 하나의 벽체를 이루는 재료 레이어 묶음을 찾는다.
 
