@@ -957,6 +957,28 @@ def _assembly_space_fraction(union_footprint, space_footprint, buffer_dist=_APPO
     return inter.area / union_footprint.area
 
 
+def _pick_assembly_representative(members):
+    """조립체(같은 벽면을 이루는 재료 레이어 묶음) 멤버들 중 '대표'를 고른다.
+    [수정사항] 처음엔 own_area(폭x높이)가 가장 큰 멤버를 대표로 뽑았는데, 마감재가
+    구조체보다 오히려 더 긴 하나의 조각으로 모델링된 경우(예: 구조체는 2조각으로
+    나뉘어 있고 마감재는 그 전체 구간을 커버하는 1조각) 마감재의 own_area가 더 커서
+    대표로 잘못 뽑히는 사례가 실측 확인됨(석고보드 29.01㎡ vs 구조체 W6_200 두 조각
+    16.34+11.38㎡). 마감재는 얇고 구조체(콘크리트/조적)는 두껍다는 특성이 훨씬
+    안정적인 구분 기준이므로, 이제 '두께가 가장 두꺼운' 멤버를 대표로 고른다."""
+    best_guid = None
+    best_thickness = -1.0
+    for g, w in members:
+        _h, _l, t = ite._get_wall_height_length_thickness_mm(w)
+        if t is not None and t > best_thickness:
+            best_thickness = t
+            best_guid = g
+    if best_guid is not None:
+        return best_guid
+    # 두께 정보가 전혀 없으면 own_area 기준으로 폴백
+    own_areas = {g: (_get_wall_side_area_m2(w)[0] or 0.0) for g, w in members}
+    return max(own_areas, key=own_areas.get)
+
+
 def _compute_assembly_own_area(members, own_areas, union_footprint):
     """조립체 하나의 '자체' 면적(공간 안분 이전)을 계산한다.
     - 멤버 1개(대다수 벽): 그 멤버의 own_area 그대로(기존과 동일)
@@ -1035,12 +1057,13 @@ def compute_wall_space_splits(ifc_file, storey_entity):
             for sp in wall_to_spaces.get(g, []):
                 touching[sp.GlobalId] = sp
         if not touching:
+            rep_guid_fallback = _pick_assembly_representative(members)
             for g, _w in members:
-                wall_to_representative[g] = members[0][0]
+                wall_to_representative[g] = rep_guid_fallback
             continue
 
         own_areas = {g: (_get_wall_side_area_m2(w)[0] or 0.0) for g, w in members}
-        rep_guid = max(own_areas, key=own_areas.get)
+        rep_guid = _pick_assembly_representative(members)
         for g, _w in members:
             wall_to_representative[g] = rep_guid
 
@@ -1278,7 +1301,7 @@ def compute_wall_area_attribution(ifc_file, storey_entity):
         total += assembly_area
         if not any(g in covered for g, _w in members):
             residual += assembly_area
-            rep_guid = max(own_areas, key=own_areas.get)
+            rep_guid = _pick_assembly_representative(members)
             rep_name = wall_ent_by_guid[rep_guid].Name or '(이름없음)'
             if len(members) > 1:
                 rep_name += f' 외 레이어{len(members) - 1}개'

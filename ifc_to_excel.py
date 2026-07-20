@@ -448,23 +448,35 @@ def _get_pset_area_fallback(flat_props):
 
 SYSTEM_ASSEMBLY_CLASSES = {'IfcDoor', 'IfcWindow', 'IfcCurtainWall'}
 
-def _get_wall_height_length_mm(ent):
-    """벽 하나의 (높이, 길이)를 mm 단위로 분리 반환한다. floorplan_core._get_wall_side_area_m2
-    와 동일한 '층고 범위(1.5~8m) 인식' 규칙을 쓴다 - 벽 조립체의 대표 높이를 정할 때
-    재사용하기 위해 별도 함수로 분리."""
+def _get_wall_height_length_thickness_mm(ent):
+    """벽 하나의 (높이, 길이, 두께)를 mm 단위로 분리 반환한다. floorplan_core._get_wall_
+    side_area_m2와 동일한 '층고 범위(1.5~8m) 인식' 규칙을 쓴다. 두께는 높이/길이를 뺀
+    나머지(대개 가장 작은 값)로, 조립체 안에서 마감재(얇음)와 구조체(두꺼움)를 구분해
+    대표를 정할 때 쓴다 - 면적(폭x높이)만으로는 마감재가 한 조각으로 길게 모델링된
+    경우 구조체보다 오히려 커 보일 수 있어 부적절함이 실측으로 확인됨."""
     x, y, z, src = _get_local_dimensions(ent)
     dims_list = [d for d in (x, y, z) if d is not None]
     if len(dims_list) < 2:
-        return None, None
+        return None, None, None
     plausible_height = [d for d in dims_list if 1500.0 <= d <= 8000.0]
     if plausible_height:
         height = max(plausible_height)
         remaining = list(dims_list)
         remaining.remove(height)
-        length = max(remaining) if remaining else height
+        remaining.sort(reverse=True)
+        length = remaining[0] if remaining else height
+        thickness = remaining[1] if len(remaining) > 1 else None
     else:
         dims_sorted = sorted(dims_list, reverse=True)
         length, height = dims_sorted[0], dims_sorted[1]
+        thickness = dims_sorted[2] if len(dims_sorted) > 2 else None
+    return height, length, thickness
+
+
+def _get_wall_height_length_mm(ent):
+    """벽 하나의 (높이, 길이)를 mm 단위로 분리 반환한다(두께는 버림). 하위호환을 위해
+    유지 - 두께까지 필요하면 _get_wall_height_length_thickness_mm를 쓴다."""
+    height, length, _thickness = _get_wall_height_length_thickness_mm(ent)
     return height, length
 
 
